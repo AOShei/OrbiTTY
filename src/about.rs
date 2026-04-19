@@ -4,12 +4,12 @@ use libadwaita as adw;
 
 pub fn show(parent: Option<&gtk::Window>) {
     let about = adw::AboutWindow::builder()
-        .application_name("Orbitty")
+        .application_name("OrbiTTY")
         .application_icon("utilities-terminal")
-        .developer_name("Orbitty Contributors")
+        .developer_name("OrbiTTY Contributors")
         .version(env!("CARGO_PKG_VERSION"))
         .license_type(gtk::License::MitX11)
-        .comments("Workspace-based, tiling GTK4 terminal for async tasks.")
+        .comments("Workspace-based, tiling GTK4 terminal emulator for Linux.")
         .build();
     if let Some(p) = parent {
         about.set_transient_for(Some(p));

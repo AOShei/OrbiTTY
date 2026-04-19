@@ -146,6 +146,17 @@ impl Session {
         tile_header.append(&demote_btn);
         tile_header.append(&tile_close_btn);
 
+        // Clicking the header focuses this tile's VTE.
+        {
+            let cb = cb.clone();
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
+            gesture.connect_pressed(move |_, _, _, _| {
+                (cb.borrow())(id, SessionEvent::Focused);
+            });
+            tile_header.add_controller(gesture);
+        }
+
         let tile_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
         tile_slot.set_hexpand(true);
         tile_slot.set_vexpand(true);
@@ -244,21 +255,6 @@ impl Session {
             card_close_btn.connect_clicked(move |_| {
                 (cb.borrow())(id, SessionEvent::RequestClose);
             });
-        }
-        {
-            // Click anywhere on the card to focus/toggle promote.
-            let cb = cb.clone();
-            let click = gtk::GestureClick::new();
-            click.set_button(0);
-            click.connect_pressed(move |gesture, _, _, _| {
-                if let Some(event) = gesture.current_event() {
-                    if let Some(btn) = event.downcast_ref::<gtk::gdk::ButtonEvent>() {
-                        let _ = btn;
-                    }
-                }
-                (cb.borrow())(id, SessionEvent::RequestPromote);
-            });
-            session.inner.borrow().card_frame.add_controller(click);
         }
         {
             // Focus tile on VTE focus.

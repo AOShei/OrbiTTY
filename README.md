@@ -1,8 +1,8 @@
-# Orbitty
+# OrbiTTY
 
 Workspace-based, tiling GTK4 terminal emulator for Linux.
 
-Orbitty gives you a **Mission Control** view of your terminal sessions: up to 4 active terminals tiled in a central arena, with the rest visible as live previews in a monitoring sidebar. Switch contexts instantly — sessions are never restarted, just reparented between views.
+OrbiTTY gives you a **Mission Control** view of your terminal sessions: up to 4 active terminals tiled in a central arena, with the rest visible as live previews in a monitoring sidebar. Switch contexts instantly — sessions are never restarted, just reparented between views.
 
 ## Features
 

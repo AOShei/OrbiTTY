@@ -8,7 +8,7 @@ use std::rc::{Rc, Weak};
 
 use crate::window::OrbitWindow;
 
-const APP_ID: &str = "dev.orbit.Orbit";
+const APP_ID: &str = "dev.orbitty.OrbiTTY";
 
 pub struct AppState {
     pub font_scale: f64,

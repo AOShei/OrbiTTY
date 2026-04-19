@@ -43,7 +43,7 @@ fn build_menu_model() -> gio::Menu {
     let end = gio::Menu::new();
     end.append(Some("_Preferences"), Some("app.preferences"));
     end.append(Some("_Keyboard Shortcuts"), Some("app.shortcuts"));
-    end.append(Some("_About Orbitty"), Some("app.about"));
+    end.append(Some("_About OrbiTTY"), Some("app.about"));
     model.append_section(None, &end);
 
     model

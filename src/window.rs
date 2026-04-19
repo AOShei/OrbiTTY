@@ -23,7 +23,7 @@ impl OrbitWindow {
     pub fn new(app: &adw::Application) -> Rc<Self> {
         let window = adw::ApplicationWindow::builder()
             .application(app)
-            .title("Orbit")
+            .title("OrbiTTY")
             .default_width(1400)
             .default_height(900)
             .build();
@@ -39,7 +39,7 @@ impl OrbitWindow {
 
         // --- Header ---
         let header = adw::HeaderBar::new();
-        let title = adw::WindowTitle::new("Orbit", "Mission Control for Terminals");
+        let title = adw::WindowTitle::new("OrbiTTY", "Mission Control for Terminals");
         header.set_title_widget(Some(&title));
 
         // Tab overview toggle on the left.
