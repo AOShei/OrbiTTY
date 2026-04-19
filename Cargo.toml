@@ -1,0 +1,22 @@
+[package]
+name = "orbit"
+version = "0.1.0"
+edition = "2021"
+description = "Workspace-based, tiling GTK4 terminal for async tasks"
+license = "MIT"
+
+[[bin]]
+name = "orbit"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { package = "gtk4", version = "0.9", features = ["v4_14"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+vte4 = "0.8"
+glib = "0.20"
+gio = "0.20"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

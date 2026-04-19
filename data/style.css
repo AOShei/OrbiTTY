@@ -1,0 +1,131 @@
+/* Orbit - GTK4 CSS */
+
+.orbit-sidebar {
+    background-color: alpha(@card_bg_color, 0.5);
+    border-left: 1px solid @borders;
+    padding: 8px;
+}
+
+.orbit-preview-card {
+    background: @card_bg_color;
+    border-radius: 10px;
+    border: 1px solid alpha(@borders, 0.6);
+    padding: 6px;
+    margin: 2px 0;
+    transition: border-color 150ms ease, background 150ms ease;
+}
+
+.orbit-preview-card:hover {
+    border-color: alpha(@accent_color, 0.7);
+    background: alpha(@accent_bg_color, 0.15);
+}
+
+.orbit-preview-card.active {
+    border-color: @accent_color;
+}
+
+.orbit-preview-title {
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.orbit-pip {
+    min-width: 12px;
+    min-height: 12px;
+    border-radius: 999px;
+    margin: 2px 6px 2px 2px;
+    background: @success_color;
+    box-shadow: 0 0 6px alpha(@success_color, 0.5);
+    transition: background 200ms ease, box-shadow 200ms ease;
+    padding: 0;
+    border: none;
+}
+
+.orbit-pip.idle {
+    background: @success_color;
+    box-shadow: 0 0 4px alpha(@success_color, 0.4);
+}
+
+.orbit-pip.activity {
+    background: @accent_color;
+    box-shadow: 0 0 8px alpha(@accent_color, 0.8);
+}
+
+.orbit-pip.alert {
+    background: @error_color;
+    box-shadow: 0 0 10px alpha(@error_color, 0.9);
+}
+
+.orbit-arena {
+    background: @window_bg_color;
+}
+
+.orbit-tile {
+    border-radius: 8px;
+    background: @view_bg_color;
+    padding: 0;
+    margin: 3px;
+    border: 1px solid alpha(@borders, 0.4);
+    transition: border-color 120ms ease;
+}
+
+.orbit-tile.focused {
+    border-color: @accent_color;
+    box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.4);
+}
+
+.orbit-tile-header {
+    background: alpha(@headerbar_bg_color, 0.6);
+    padding: 2px 6px;
+    border-bottom: 1px solid alpha(@borders, 0.4);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+}
+
+.orbit-tile-title {
+    font-size: 0.85em;
+    font-weight: 500;
+}
+
+.orbit-mini-vte {
+    border-radius: 6px;
+}
+
+.orbit-empty-state {
+    color: alpha(@window_fg_color, 0.6);
+}
+
+/* Theme selector circles (System / Light / Dark) */
+.orbit-theme-choice {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid alpha(@borders, 0.6);
+    background-size: cover;
+    background-position: center;
+    box-shadow: none;
+}
+
+.orbit-theme-choice:hover {
+    border-color: alpha(@accent_color, 0.6);
+}
+
+.orbit-theme-choice:checked {
+    border-color: @accent_color;
+    box-shadow: 0 0 0 2px alpha(@accent_color, 0.35);
+}
+
+.orbit-theme-choice.system {
+    background-image: linear-gradient(to right, #ffffff 50%, #1e1e1e 50%);
+}
+
+.orbit-theme-choice.light {
+    background-color: #ffffff;
+    background-image: none;
+}
+
+.orbit-theme-choice.dark {
+    background-color: #1e1e1e;
+    background-image: none;
+}
