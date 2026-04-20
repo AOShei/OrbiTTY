@@ -91,8 +91,9 @@ impl Workspace {
                     let weak = weak.clone();
                     dt.connect_enter(move |_dt, x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
-                            let arena = inner_rc.borrow().arena.clone();
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            if guard.get() { return gtk::gdk::DragAction::MOVE; }
+                            let arena = inner_rc.borrow().arena.clone();
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             gen_rc.set(gen_rc.get().wrapping_add(1));
                             let gen = gen_rc.get();
@@ -113,8 +114,9 @@ impl Workspace {
                     let weak = weak.clone();
                     dt.connect_motion(move |_dt, x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
-                            let arena = inner_rc.borrow().arena.clone();
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            if guard.get() { return gtk::gdk::DragAction::MOVE; }
+                            let arena = inner_rc.borrow().arena.clone();
                             if !arena.is_full() {
                                 let slot = arena.slot_from_coords(x, y);
                                 if slot != arena.phantom_slot() {
@@ -137,6 +139,7 @@ impl Workspace {
                     dt.connect_leave(move |_dt| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            if guard.get() { return; }
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             let gen = gen_rc.get();
                             let ws = Workspace { inner: inner_rc };
@@ -204,8 +207,9 @@ impl Workspace {
                     let weak = weak.clone();
                     dt.connect_enter(move |_dt, _x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
-                            let sidebar = inner_rc.borrow().sidebar.clone();
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            if guard.get() { return gtk::gdk::DragAction::MOVE; }
+                            let sidebar = inner_rc.borrow().sidebar.clone();
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             gen_rc.set(gen_rc.get().wrapping_add(1));
                             let gen = gen_rc.get();
@@ -223,6 +227,8 @@ impl Workspace {
                     let weak = weak.clone();
                     dt.connect_motion(move |_dt, _x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
+                            let guard = inner_rc.borrow().suppressing_hover.clone();
+                            if guard.get() { return gtk::gdk::DragAction::MOVE; }
                             let sidebar = inner_rc.borrow().sidebar.clone();
                             sidebar.move_placeholder(y);
                         }
@@ -234,6 +240,7 @@ impl Workspace {
                     dt.connect_leave(move |_dt| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            if guard.get() { return; }
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             let gen = gen_rc.get();
                             let ws = Workspace { inner: inner_rc };
