@@ -499,11 +499,6 @@ impl Workspace {
     /// and whether the arena has room; see the verification table in the plan.
     pub fn handle_drop(&self, source_id: u32, target_id: u32) {
         if source_id == target_id {
-            // Self-drop: commit any active preview swap, then return.
-            let arena = self.inner.borrow().arena.clone();
-            if arena.has_preview_swap() {
-                arena.commit_preview_swap();
-            }
             return;
         }
         // Clear visual previews before executing the drop.
@@ -521,12 +516,7 @@ impl Workspace {
         match (source_in_arena, target_in_arena, source_in_sidebar, target_in_sidebar) {
             // Arena → arena reorder.
             (true, true, _, _) => {
-                if arena.has_preview_swap() {
-                    // Preview already shows the swapped layout — just commit it.
-                    arena.commit_preview_swap();
-                } else {
-                    arena.swap_sessions(source_id, target_id);
-                }
+                arena.swap_sessions(source_id, target_id);
             }
 
             // Sidebar → arena.
@@ -807,7 +797,6 @@ impl Workspace {
         gen_rc.set(gen_rc.get().wrapping_add(1));
         let gen = gen_rc.get();
 
-        let source_in_arena = arena.contains(source_id);
         let source_in_sidebar = sidebar.contains(source_id);
         let target_in_arena = arena.contains(target_id);
 
@@ -825,17 +814,8 @@ impl Workspace {
             return;
         }
 
-        // Arena → arena: preview swap.
-        if source_in_arena && target_in_arena && source_id != target_id {
-            glib::idle_add_local_once(move || {
-                if gen_rc.get() != gen { return; }
-                guard.set(true);
-                arena.preview_swap(source_id, target_id);
-                glib::idle_add_local_once(move || {
-                    guard.set(false);
-                });
-            });
-        }
+        // Arena → arena: no preview swap — just let the CSS drop-hover
+        // highlight show the target. The actual swap happens on drop.
     }
 
     /// Handle continuous cursor motion within a tile during drag.

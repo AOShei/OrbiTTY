@@ -403,8 +403,9 @@ impl Session {
             }
             drop_target.connect_drop(move |_target, value, _x, _y| {
                 if let Ok(source_id) = value.get::<u32>() {
-                    // Always emit — self-drops commit preview swaps.
-                    (cb.borrow())(id, SessionEvent::RequestSwap(source_id));
+                    if source_id != id {
+                        (cb.borrow())(id, SessionEvent::RequestSwap(source_id));
+                    }
                     return true;
                 }
                 false
