@@ -362,11 +362,17 @@ impl Workspace {
                     }
                     ws.clear_all_previews();
                 }
-                SessionEvent::DragHoverEnter(source_id) => {
+                SessionEvent::DragHoverEnter(source_id, tx, ty) => {
                     // Skip if this event is a side-effect of a preview rebuild.
                     let guard = ws.inner.borrow().suppressing_hover.clone();
                     if !guard.get() {
-                        ws.handle_drag_hover_enter(source_id, id);
+                        ws.handle_drag_hover_enter(source_id, id, tx, ty);
+                    }
+                }
+                SessionEvent::DragHoverMotion(source_id, tx, ty) => {
+                    let guard = ws.inner.borrow().suppressing_hover.clone();
+                    if !guard.get() {
+                        ws.handle_drag_hover_motion(source_id, id, tx, ty);
                     }
                 }
                 SessionEvent::DragHoverLeave(source_id) => {
@@ -726,9 +732,9 @@ impl Workspace {
     }
 
     /// Handle drag hover entering a session's drop zone.
-    /// Deferred to idle to avoid restructuring the widget tree during
-    /// DropTarget event handlers (which causes GTK unrealize assertions).
-    fn handle_drag_hover_enter(&self, source_id: u32, target_id: u32) {
+    /// Uses tile-local coordinates translated to grid space for accurate
+    /// phantom slot calculation.
+    fn handle_drag_hover_enter(&self, source_id: u32, target_id: u32, tile_x: f64, tile_y: f64) {
         let (arena, sidebar, guard) = {
             let inner = self.inner.borrow();
             (inner.arena.clone(), inner.sidebar.clone(), inner.suppressing_hover.clone())
@@ -742,18 +748,60 @@ impl Workspace {
         let source_in_sidebar = sidebar.contains(source_id);
         let target_in_arena = arena.contains(target_id);
 
-        // Sidebar → arena (has room): show phantom at the target tile's slot.
+        // Sidebar → arena (has room): show phantom at the cursor's grid position.
         if source_in_sidebar && target_in_arena && !arena.is_full() {
-            let slot = arena.session_ids().iter().position(|&x| x == target_id).unwrap_or(0);
+            let slot = self.grid_slot_from_tile(target_id, tile_x, tile_y);
             glib::idle_add_local_once(move || {
                 if gen_rc.get() != gen { return; }
                 guard.set(true);
-                arena.show_phantom_at(slot);
+                arena.ensure_phantom_at(slot);
                 guard.set(false);
             });
         }
-        // Arena→arena and other cases: CSS drop-hover class (already applied
-        // in session.rs DropTarget handlers) provides the visual feedback.
+    }
+
+    /// Handle continuous cursor motion within a tile during drag.
+    /// Updates phantom position based on actual cursor location in the grid.
+    fn handle_drag_hover_motion(&self, source_id: u32, target_id: u32, tile_x: f64, tile_y: f64) {
+        let (arena, sidebar, guard) = {
+            let inner = self.inner.borrow();
+            (inner.arena.clone(), inner.sidebar.clone(), inner.suppressing_hover.clone())
+        };
+
+        let source_in_sidebar = sidebar.contains(source_id);
+        let target_in_arena = arena.contains(target_id);
+
+        if source_in_sidebar && target_in_arena && !arena.is_full() {
+            let slot = self.grid_slot_from_tile(target_id, tile_x, tile_y);
+            if slot == arena.phantom_slot() && arena.has_phantom() {
+                return; // Already at correct position.
+            }
+            let gen_rc = self.inner.borrow().drag_hover_gen.clone();
+            let gen = gen_rc.get();
+            glib::idle_add_local_once(move || {
+                if gen_rc.get() != gen { return; }
+                guard.set(true);
+                arena.ensure_phantom_at(slot);
+                guard.set(false);
+            });
+        }
+    }
+
+    /// Translate tile-local coordinates to arena grid coordinates and compute
+    /// the phantom slot index.
+    fn grid_slot_from_tile(&self, target_id: u32, tile_x: f64, tile_y: f64) -> usize {
+        let arena = self.inner.borrow().arena.clone();
+        if let Some(target) = self.find(target_id) {
+            let tile_frame = target.tile_frame();
+            let grid = arena.widget();
+            if let Some(p) = tile_frame.compute_point(
+                &grid,
+                &gtk::graphene::Point::new(tile_x as f32, tile_y as f32),
+            ) {
+                return arena.slot_from_coords(p.x() as f64, p.y() as f64);
+            }
+        }
+        0
     }
 
     /// Handle drag hover leaving a session's drop zone.

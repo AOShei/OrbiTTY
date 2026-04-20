@@ -144,6 +144,18 @@ impl Arena {
         self.sessions.borrow().iter().map(|s| s.id()).collect()
     }
 
+    /// Show or move phantom to the given slot. Avoids unnecessary rebuilds.
+    pub fn ensure_phantom_at(&self, slot: usize) {
+        if self.sessions.borrow().len() >= MAX_ACTIVE {
+            return;
+        }
+        if self.phantom.borrow().is_some() {
+            self.move_phantom_to(slot);
+        } else {
+            self.show_phantom_at(slot);
+        }
+    }
+
     /// Show a phantom placeholder at the given slot index, previewing the n+1 layout.
     pub fn show_phantom_at(&self, slot: usize) {
         if self.sessions.borrow().len() >= MAX_ACTIVE {
@@ -183,6 +195,11 @@ impl Arena {
     /// Return the slot index where the phantom is currently shown.
     pub fn phantom_slot(&self) -> usize {
         self.phantom_index.get()
+    }
+
+    /// Return whether the phantom is currently shown.
+    pub fn has_phantom(&self) -> bool {
+        self.phantom.borrow().is_some()
     }
 
     /// Compute which slot index a point (x, y) in grid coordinates maps to,

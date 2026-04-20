@@ -42,8 +42,10 @@ pub enum SessionEvent {
     Bell,
     DragStarted,
     DragEnded,
-    /// A drag carrying `source_id` entered this session's drop zone.
-    DragHoverEnter(u32),
+    /// A drag carrying `source_id` entered this session's drop zone (tile-local coords).
+    DragHoverEnter(u32, f64, f64),
+    /// Cursor moved within this session's tile while dragging (tile-local coords).
+    DragHoverMotion(u32, f64, f64),
     /// A drag left this session's drop zone.
     DragHoverLeave(u32),
 }
@@ -329,11 +331,22 @@ impl Session {
             {
                 let cb = cb.clone();
                 let tile_frame = tile_frame.clone();
-                drop_target.connect_enter(move |dt, _x, _y| {
+                drop_target.connect_enter(move |dt, x, y| {
                     tile_frame.add_css_class("drop-hover");
                     if let Some(source_id) = extract_source_id(dt) {
                         if source_id != id {
-                            (cb.borrow())(id, SessionEvent::DragHoverEnter(source_id));
+                            (cb.borrow())(id, SessionEvent::DragHoverEnter(source_id, x, y));
+                        }
+                    }
+                    gtk::gdk::DragAction::MOVE
+                });
+            }
+            {
+                let cb = cb.clone();
+                drop_target.connect_motion(move |dt, x, y| {
+                    if let Some(source_id) = extract_source_id(dt) {
+                        if source_id != id {
+                            (cb.borrow())(id, SessionEvent::DragHoverMotion(source_id, x, y));
                         }
                     }
                     gtk::gdk::DragAction::MOVE
@@ -377,7 +390,7 @@ impl Session {
                     card_frame.add_css_class("drop-hover");
                     if let Some(source_id) = extract_source_id(dt) {
                         if source_id != id {
-                            (cb.borrow())(id, SessionEvent::DragHoverEnter(source_id));
+                            (cb.borrow())(id, SessionEvent::DragHoverEnter(source_id, 0.0, 0.0));
                         }
                     }
                     gtk::gdk::DragAction::MOVE
