@@ -103,6 +103,17 @@ impl Session {
         vte.set_font(Some(&font_desc));
         vte.set_font_scale(crate::app::current_font_scale());
 
+        // Sync VTE colors with the Adwaita color scheme.
+        apply_vte_theme(&vte);
+        {
+            let vte_weak = vte.downgrade();
+            adw::StyleManager::default().connect_dark_notify(move |_sm| {
+                if let Some(vte) = vte_weak.upgrade() {
+                    apply_vte_theme(&vte);
+                }
+            });
+        }
+
         // --- Arena tile shell ---
         let tile_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
         tile_frame.add_css_class("orbit-tile");
@@ -735,4 +746,20 @@ fn make_pip() -> gtk::Box {
     pip.set_valign(gtk::Align::Center);
     pip.set_halign(gtk::Align::Center);
     pip
+}
+
+/// Set VTE terminal foreground/background to match the current Adwaita theme.
+fn apply_vte_theme(vte: &vte4::Terminal) {
+    let dark = adw::StyleManager::default().is_dark();
+    let (fg, bg) = if dark {
+        // Adwaita dark: light text on dark bg
+        (gtk::gdk::RGBA::new(0.93, 0.93, 0.93, 1.0),
+         gtk::gdk::RGBA::new(0.12, 0.12, 0.12, 1.0))
+    } else {
+        // Adwaita light: dark text on light bg
+        (gtk::gdk::RGBA::new(0.2, 0.2, 0.2, 1.0),
+         gtk::gdk::RGBA::new(0.98, 0.98, 0.98, 1.0))
+    };
+    vte.set_color_foreground(&fg);
+    vte.set_color_background(&bg);
 }
