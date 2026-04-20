@@ -63,6 +63,10 @@ impl Sidebar {
         self.list.clone()
     }
 
+    pub fn scroller_widget(&self) -> gtk::ScrolledWindow {
+        self.scroller.clone()
+    }
+
     pub fn add(&self, session: Session) {
         self.list.append(&session.card_frame());
         self.sessions.borrow_mut().push(session);

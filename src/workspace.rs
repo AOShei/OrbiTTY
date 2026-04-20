@@ -72,12 +72,12 @@ impl Workspace {
         //   - Arena empty-state: drop here promotes the dragged session.
         //   - Sidebar list: drop on blank space demotes; hover shows placeholder.
         {
-            let (arena_grid, empty_state, list) = {
+            let (arena_grid, empty_state, sidebar_scroller) = {
                 let inner = workspace.inner.borrow();
                 (
                     inner.arena.widget(),
                     inner.arena.empty_state_widget(),
-                    inner.sidebar.list_widget(),
+                    inner.sidebar.scroller_widget(),
                 )
             };
             // Arena grid: hover shows phantom when sidebar card is dragged over.
@@ -229,13 +229,15 @@ impl Workspace {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
                             if guard.get() { return gtk::gdk::DragAction::MOVE; }
                             let sidebar = inner_rc.borrow().sidebar.clone();
+                            let scroll_y = sidebar.scroller_widget().vadjustment().value();
+                            let list_y = y + scroll_y;
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             gen_rc.set(gen_rc.get().wrapping_add(1));
                             let gen = gen_rc.get();
                             glib::idle_add_local_once(move || {
                                 if gen_rc.get() != gen { return; }
                                 guard.set(true);
-                                sidebar.show_placeholder(y);
+                                sidebar.show_placeholder(list_y);
                                 guard.set(false);
                             });
                         }
@@ -249,7 +251,9 @@ impl Workspace {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
                             if guard.get() { return gtk::gdk::DragAction::MOVE; }
                             let sidebar = inner_rc.borrow().sidebar.clone();
-                            sidebar.move_placeholder(y);
+                            let scroll_y = sidebar.scroller_widget().vadjustment().value();
+                            let list_y = y + scroll_y;
+                            sidebar.move_placeholder(list_y);
                         }
                         gtk::gdk::DragAction::MOVE
                     });
@@ -294,7 +298,7 @@ impl Workspace {
                         true
                     });
                 }
-                list.add_controller(dt);
+                sidebar_scroller.add_controller(dt);
             }
         }
 
