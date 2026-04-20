@@ -60,6 +60,15 @@
     background: @window_bg_color;
 }
 
+/* Suppress GTK's default DropTarget highlight on the arena grid itself;
+   individual tiles handle their own drop-hover feedback. */
+.orbit-arena:drop(active) {
+    outline: none;
+    box-shadow: none;
+    border-color: transparent;
+    background: @window_bg_color;
+}
+
 .orbit-tile {
     border-radius: 8px;
     background: @view_bg_color;
