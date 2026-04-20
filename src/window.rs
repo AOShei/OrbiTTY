@@ -10,6 +10,100 @@ use crate::menu;
 use crate::templates::WorkspaceTemplate;
 use crate::workspace::Workspace;
 
+/// Show a lightweight name-entry popup. Enter confirms, Escape/click-outside cancels.
+fn show_name_dialog(
+    parent: &adw::ApplicationWindow,
+    heading: &str,
+    initial_text: &str,
+    _confirm_label: &str,
+    on_confirm: impl FnOnce(String) + 'static,
+) {
+    let header = adw::HeaderBar::builder()
+        .show_end_title_buttons(false)
+        .show_start_title_buttons(false)
+        .decoration_layout(":")
+        .build();
+    let title = gtk::Label::new(Some(heading));
+    title.add_css_class("heading");
+    header.set_title_widget(Some(&title));
+
+    let entry = gtk::Entry::builder()
+        .placeholder_text("Workspace name")
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(8)
+        .margin_bottom(12)
+        .build();
+    entry.set_text(initial_text);
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.append(&entry);
+
+    let dialog = gtk::Window::builder()
+        .transient_for(parent)
+        .modal(false)
+        .default_width(300)
+        .resizable(false)
+        .titlebar(&header)
+        .child(&vbox)
+        .build();
+
+    let cb: Rc<RefCell<Option<Box<dyn FnOnce(String)>>>> =
+        Rc::new(RefCell::new(Some(Box::new(on_confirm))));
+    let closed: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+
+    let do_close = {
+        let closed = closed.clone();
+        let d = dialog.clone();
+        move || {
+            if !closed.get() {
+                closed.set(true);
+                d.destroy();
+            }
+        }
+    };
+
+    // Enter confirms and closes.
+    let cb2 = cb.clone();
+    let close = do_close.clone();
+    entry.connect_activate(move |entry| {
+        let name = entry.text().trim().to_string();
+        close();
+        if !name.is_empty() {
+            if let Some(f) = cb2.borrow_mut().take() {
+                f(name);
+            }
+        }
+    });
+
+    // Escape key closes the dialog.
+    let close = do_close.clone();
+    let esc = gtk::EventControllerKey::new();
+    esc.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            close();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    dialog.add_controller(esc);
+
+    // Click outside: window loses active → close.
+    let close = do_close.clone();
+    dialog.connect_is_active_notify(move |win| {
+        if !win.is_active() {
+            close();
+        }
+    });
+
+    dialog.present();
+    entry.grab_focus();
+    if !initial_text.is_empty() {
+        entry.select_region(0, -1);
+    }
+}
+
 pub struct OrbitWindow {
     pub window: adw::ApplicationWindow,
     tab_view: adw::TabView,
@@ -53,10 +147,15 @@ impl OrbitWindow {
         let menu_btn = menu::build_main_menu_button();
         header.pack_end(&menu_btn);
 
-        let new_btn = gtk::Button::from_icon_name("tab-new-symbolic");
-        new_btn.set_tooltip_text(Some("New Workspace"));
-        new_btn.set_action_name(Some("win.new-workspace"));
-        header.pack_end(&new_btn);
+        let new_ws_btn = gtk::Button::from_icon_name("tab-new-symbolic");
+        new_ws_btn.set_tooltip_text(Some("New Workspace"));
+        new_ws_btn.set_action_name(Some("win.new-workspace"));
+        header.pack_end(&new_ws_btn);
+
+        let new_term_btn = gtk::Button::from_icon_name("list-add-symbolic");
+        new_term_btn.set_tooltip_text(Some("New Terminal"));
+        new_term_btn.set_action_name(Some("win.new-session"));
+        header.pack_end(&new_term_btn);
 
         // Toolbar layout: header + tab-bar on top, tab-view as content.
         let toolbar_view = adw::ToolbarView::new();
@@ -83,14 +182,22 @@ impl OrbitWindow {
 
         this.install_actions();
 
-        // The "+" inside the overview creates a new empty workspace.
+        // The "+" inside the overview creates a workspace and prompts for a name.
         {
             let weak = Rc::downgrade(&this);
             tab_overview.connect_create_tab(move |_| {
                 let this = weak.upgrade().expect("window dropped");
                 let t = WorkspaceTemplate::by_name("Empty")
                     .expect("Empty template must exist");
-                this.open_workspace(&t)
+                let page = this.open_workspace(&t, "Untitled");
+                let weak2 = Rc::downgrade(&this);
+                let page_clone = page.clone();
+                glib::idle_add_local_once(move || {
+                    if let Some(this) = weak2.upgrade() {
+                        this.rename_page(&page_clone);
+                    }
+                });
+                page
             });
         }
 
@@ -112,8 +219,22 @@ impl OrbitWindow {
             });
         }
 
+        // When switching tabs, focus the first terminal in the new workspace.
+        {
+            let weak = Rc::downgrade(&this);
+            tab_view.connect_selected_page_notify(move |_| {
+                let weak2 = weak.clone();
+                glib::idle_add_local_once(move || {
+                    let Some(this) = weak2.upgrade() else { return };
+                    if let Some(ws) = this.current_workspace() {
+                        ws.refocus();
+                    }
+                });
+            });
+        }
+
         if let Some(default_t) = WorkspaceTemplate::by_name("Empty") {
-            this.open_workspace(&default_t);
+            this.open_workspace(&default_t, "Workspace");
         }
 
         this
@@ -135,7 +256,7 @@ impl OrbitWindow {
         format!("{:p}", page.as_ptr())
     }
 
-    fn open_workspace(&self, template: &WorkspaceTemplate) -> adw::TabPage {
+    fn open_workspace(&self, template: &WorkspaceTemplate, name: &str) -> adw::TabPage {
         let id = {
             let mut n = self.next_ws_id.borrow_mut();
             let id = *n;
@@ -143,44 +264,43 @@ impl OrbitWindow {
             id
         };
 
-        let name = template.name.to_string();
-        let ws = Workspace::new(id, &name, template);
+        let ws = Workspace::new(id, name, template);
         let page = self.tab_view.append(&ws.widget());
-        page.set_title(&name);
+        page.set_title(name);
 
         let key = self.page_key(&page);
         self.workspaces.borrow_mut().insert(id, ws.clone());
         self.page_map.borrow_mut().insert(key, id);
 
-        self.renumber_duplicates(template.name);
         self.tab_view.set_selected_page(&page);
+
+        // Focus the first terminal so the user can start typing immediately.
+        ws.refocus();
+
         page
     }
 
-    fn renumber_duplicates(&self, template_name: &str) {
-        let mut same: Vec<adw::TabPage> = Vec::new();
-        let n = self.tab_view.n_pages();
-        for i in 0..n {
-            let page = self.tab_view.nth_page(i);
-            let key = self.page_key(&page);
-            if let Some(&wid) = self.page_map.borrow().get(&key) {
-                if let Some(ws) = self.workspaces.borrow().get(&wid) {
-                    if ws.inner.borrow().template_name == template_name {
-                        same.push(page);
+    fn rename_page(&self, page: &adw::TabPage) {
+        let current_title = page.title().to_string();
+        let page = page.clone();
+        let workspaces = self.workspaces.clone();
+        let page_map = self.page_map.clone();
+
+        show_name_dialog(
+            &self.window,
+            "Rename Workspace",
+            &current_title,
+            "Rename",
+            move |name| {
+                page.set_title(&name);
+                let key = format!("{:p}", page.as_ptr());
+                if let Some(&wid) = page_map.borrow().get(&key) {
+                    if let Some(ws) = workspaces.borrow().get(&wid) {
+                        ws.inner.borrow_mut().name = name;
                     }
                 }
-            }
-        }
-
-        if same.len() <= 1 {
-            if let Some(p) = same.first() {
-                p.set_title(template_name);
-            }
-            return;
-        }
-        for (i, page) in same.iter().enumerate() {
-            page.set_title(&format!("{} ({})", template_name, i + 1));
-        }
+            },
+        );
     }
 
     fn current_workspace(&self) -> Option<Workspace> {
@@ -193,15 +313,26 @@ impl OrbitWindow {
     fn install_actions(self: &Rc<Self>) {
         let group = gio::SimpleActionGroup::new();
 
-        // Ctrl+T: new empty workspace
+        // Ctrl+T: new empty workspace (prompt for name first)
         {
             let weak = Rc::downgrade(self);
             let a = gio::SimpleAction::new("new-workspace", None);
             a.connect_activate(move |_, _| {
                 if let Some(this) = weak.upgrade() {
-                    if let Some(t) = WorkspaceTemplate::by_name("Empty") {
-                        this.open_workspace(&t);
-                    }
+                    let weak2 = Rc::downgrade(&this);
+                    show_name_dialog(
+                        &this.window,
+                        "New Workspace",
+                        "",
+                        "Create",
+                        move |name| {
+                            if let Some(this) = weak2.upgrade() {
+                                if let Some(t) = WorkspaceTemplate::by_name("Empty") {
+                                    this.open_workspace(&t, &name);
+                                }
+                            }
+                        },
+                    );
                 }
             });
             group.add_action(&a);
@@ -294,6 +425,20 @@ impl OrbitWindow {
                 if let Some(this) = weak.upgrade() {
                     let open = this.tab_overview.is_open();
                     this.tab_overview.set_open(!open);
+                }
+            });
+            group.add_action(&a);
+        }
+
+        // F2: rename current workspace
+        {
+            let weak = Rc::downgrade(self);
+            let a = gio::SimpleAction::new("rename-workspace", None);
+            a.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade() {
+                    if let Some(page) = this.tab_view.selected_page() {
+                        this.rename_page(&page);
+                    }
                 }
             });
             group.add_action(&a);

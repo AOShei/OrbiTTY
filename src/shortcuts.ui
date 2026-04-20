@@ -23,6 +23,12 @@
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Rename Workspace</property>
+                <property name="accelerator">F2</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Show All Tabs</property>
                 <property name="accelerator">&lt;Primary&gt;&lt;Shift&gt;o</property>
               </object>

@@ -116,6 +116,7 @@ fn register_actions(app: &adw::Application) {
     app.set_accels_for_action("win.new-session", &["<Primary><Shift>Return"]);
     app.set_accels_for_action("win.toggle-split", &["<Primary><Shift>e"]);
     app.set_accels_for_action("win.tab-overview", &["<Primary><Shift>o"]);
+    app.set_accels_for_action("win.rename-workspace", &["F2"]);
     app.set_accels_for_action("win.fullscreen", &["<Primary><Shift>F11"]);
     for i in 1..=9 {
         app.set_accels_for_action(

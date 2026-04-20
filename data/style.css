@@ -46,7 +46,7 @@
     box-shadow: 0 0 4px alpha(@success_color, 0.4);
 }
 
-.orbit-pip.activity {
+.orbit-pip.busy {
     background: @accent_color;
     box-shadow: 0 0 8px alpha(@accent_color, 0.8);
 }

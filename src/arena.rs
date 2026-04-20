@@ -100,6 +100,17 @@ impl Arena {
         Some(evicted)
     }
 
+    pub fn swap_sessions(&self, id_a: u32, id_b: u32) {
+        let mut v = self.sessions.borrow_mut();
+        let pos_a = v.iter().position(|s| s.id() == id_a);
+        let pos_b = v.iter().position(|s| s.id() == id_b);
+        if let (Some(a), Some(b)) = (pos_a, pos_b) {
+            v.swap(a, b);
+        }
+        drop(v);
+        self.rebuild();
+    }
+
     pub fn toggle_split(&self) {
         let mut b = self.split_horizontal.borrow_mut();
         *b = !*b;
@@ -152,13 +163,13 @@ impl Arena {
                 let s1 = &sessions[0];
                 let s2 = &sessions[1];
                 if horizontal {
-                    // top / bottom
-                    self.grid.attach(&s1.tile_frame(), 0, 0, 2, 1);
-                    self.grid.attach(&s2.tile_frame(), 0, 1, 2, 1);
-                } else {
                     // left / right
                     self.grid.attach(&s1.tile_frame(), 0, 0, 1, 2);
                     self.grid.attach(&s2.tile_frame(), 1, 0, 1, 2);
+                } else {
+                    // top / bottom (default)
+                    self.grid.attach(&s1.tile_frame(), 0, 0, 2, 1);
+                    self.grid.attach(&s2.tile_frame(), 0, 1, 2, 1);
                 }
             }
             3 => {
@@ -166,14 +177,14 @@ impl Arena {
                 let s2 = &sessions[1];
                 let s3 = &sessions[2];
                 if horizontal {
-                    // Big top, two small bottom.
-                    self.grid.attach(&s1.tile_frame(), 0, 0, 2, 1);
-                    self.grid.attach(&s2.tile_frame(), 0, 1, 1, 1);
-                    self.grid.attach(&s3.tile_frame(), 1, 1, 1, 1);
-                } else {
                     // Big left, two small right.
                     self.grid.attach(&s1.tile_frame(), 0, 0, 1, 2);
                     self.grid.attach(&s2.tile_frame(), 1, 0, 1, 1);
+                    self.grid.attach(&s3.tile_frame(), 1, 1, 1, 1);
+                } else {
+                    // Big top, two small bottom (default).
+                    self.grid.attach(&s1.tile_frame(), 0, 0, 2, 1);
+                    self.grid.attach(&s2.tile_frame(), 0, 1, 1, 1);
                     self.grid.attach(&s3.tile_frame(), 1, 1, 1, 1);
                 }
             }

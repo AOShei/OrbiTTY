@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gtk4 as gtk;
 use vte4::prelude::*;
@@ -14,7 +14,7 @@ pub enum Location {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipState {
     Idle,
-    Activity,
+    Busy,
     Alert,
 }
 
@@ -22,7 +22,7 @@ impl PipState {
     fn css(self) -> &'static str {
         match self {
             PipState::Idle => "idle",
-            PipState::Activity => "activity",
+            PipState::Busy => "busy",
             PipState::Alert => "alert",
         }
     }
@@ -37,8 +37,8 @@ pub enum SessionEvent {
     RequestDemote,
     RequestClose,
     RequestClone,
+    RequestSwap(u32),
     Focused,
-    Activity,
     Bell,
 }
 
@@ -67,7 +67,9 @@ pub struct SessionInner {
     pub location: Location,
     pub pip_state: PipState,
     pub focused: bool,
-    pub reset_source: Option<glib::SourceId>,
+    pub shell_pid: Option<i32>,
+    pub poll_source: Option<glib::SourceId>,
+    pub alert_until: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -88,26 +90,6 @@ impl Session {
         let font_desc = gtk::pango::FontDescription::from_string("Monospace 11");
         vte.set_font(Some(&font_desc));
         vte.set_font_scale(crate::app::current_font_scale());
-
-        // Spawn default shell. cwd defaults to $HOME when not supplied.
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-        let argv: [&str; 1] = [shell.as_str()];
-        let envv: [&str; 0] = [];
-
-        let home = std::env::var("HOME").ok();
-        let working_dir = cwd.or(home.as_deref());
-
-        vte.spawn_async(
-            vte4::PtyFlags::DEFAULT,
-            working_dir,
-            &argv,
-            &envv,
-            glib::SpawnFlags::DEFAULT,
-            || {},
-            -1,
-            None::<&gio::Cancellable>,
-            |_result| {},
-        );
 
         // --- Arena tile shell ---
         let tile_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -155,6 +137,16 @@ impl Session {
                 (cb.borrow())(id, SessionEvent::Focused);
             });
             tile_header.add_controller(gesture);
+        }
+
+        // Drag source on the tile header for arena reordering.
+        {
+            let drag_source = gtk::DragSource::new();
+            drag_source.set_actions(gtk::gdk::DragAction::MOVE);
+            drag_source.connect_prepare(move |_src, _x, _y| {
+                Some(gtk::gdk::ContentProvider::for_value(&id.to_value()))
+            });
+            tile_header.add_controller(drag_source);
         }
 
         let tile_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -220,7 +212,9 @@ impl Session {
             location: Location::Sidebar, // will be placed by workspace
             pip_state: PipState::Idle,
             focused: false,
-            reset_source: None,
+            shell_pid: None,
+            poll_source: None,
+            alert_until: None,
         }));
 
         let session = Session { inner };
@@ -272,12 +266,50 @@ impl Session {
                 (cb.borrow())(id, SessionEvent::Bell);
             });
         }
+        // Drop target on tile for arena swap.
         {
-            // Contents changed → activity.
             let cb = cb.clone();
-            vte.connect_contents_changed(move |_| {
-                (cb.borrow())(id, SessionEvent::Activity);
+            let drop_target = gtk::DropTarget::new(
+                <u32 as glib::types::StaticType>::static_type(),
+                gtk::gdk::DragAction::MOVE,
+            );
+            drop_target.connect_drop(move |_target, value, _x, _y| {
+                if let Ok(source_id) = value.get::<u32>() {
+                    if source_id != id {
+                        (cb.borrow())(id, SessionEvent::RequestSwap(source_id));
+                    }
+                    return true;
+                }
+                false
             });
+            session.inner.borrow().tile_frame.add_controller(drop_target);
+        }
+        // Spawn default shell. cwd defaults to $HOME when not supplied.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let argv: [&str; 1] = [shell.as_str()];
+        let envv: [&str; 0] = [];
+        let home = std::env::var("HOME").ok();
+        let working_dir = cwd.or(home.as_deref());
+        {
+            let weak = Rc::downgrade(&session.inner);
+            vte.spawn_async(
+                vte4::PtyFlags::DEFAULT,
+                working_dir,
+                &argv,
+                &envv,
+                glib::SpawnFlags::DEFAULT,
+                || {},
+                -1,
+                None::<&gio::Cancellable>,
+                move |result| {
+                    if let Ok(pid) = result {
+                        if let Some(inner_rc) = weak.upgrade() {
+                            inner_rc.borrow_mut().shell_pid = Some(pid.0 as i32);
+                            Session { inner: inner_rc }.start_polling();
+                        }
+                    }
+                },
+            );
         }
 
         session
@@ -371,44 +403,52 @@ impl Session {
 
     pub fn set_pip(&self, state: PipState) {
         let mut inner = self.inner.borrow_mut();
-        // Clear old state classes.
-        for cls in ["idle", "activity", "alert"] {
+        if inner.pip_state == state {
+            return;
+        }
+        for cls in ["idle", "busy", "alert"] {
             inner.tile_pip.remove_css_class(cls);
             inner.card_pip.remove_css_class(cls);
         }
         inner.tile_pip.add_css_class(state.css());
         inner.card_pip.add_css_class(state.css());
         inner.pip_state = state;
-
-        // Cancel any pending reset.
-        if let Some(src) = inner.reset_source.take() {
-            src.remove();
-        }
-    }
-
-    pub fn pulse_activity(&self) {
-        // Don't overwrite an alert with activity.
-        if self.inner.borrow().pip_state == PipState::Alert {
-            return;
-        }
-        self.set_pip(PipState::Activity);
-        self.schedule_reset(Duration::from_millis(600));
     }
 
     pub fn raise_alert(&self) {
         self.set_pip(PipState::Alert);
-        self.schedule_reset(Duration::from_secs(3));
+        self.inner.borrow_mut().alert_until =
+            Some(Instant::now() + Duration::from_millis(1500));
     }
 
-    fn schedule_reset(&self, dur: Duration) {
+    fn start_polling(&self) {
         let weak = Rc::downgrade(&self.inner);
-        let src = glib::timeout_add_local_once(dur, move || {
-            if let Some(inner) = weak.upgrade() {
-                let session = Session { inner };
-                session.set_pip(PipState::Idle);
+        let source = glib::timeout_add_local(Duration::from_millis(500), move || {
+            let Some(inner_rc) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let (pid, alert_until) = {
+                let inner = inner_rc.borrow();
+                (inner.shell_pid, inner.alert_until)
+            };
+            // Don't override an active alert.
+            if let Some(until) = alert_until {
+                if Instant::now() < until {
+                    return glib::ControlFlow::Continue;
+                }
+                inner_rc.borrow_mut().alert_until = None;
             }
+            let session = Session { inner: inner_rc };
+            if let Some(pid) = pid {
+                if is_shell_idle(pid) {
+                    session.set_pip(PipState::Idle);
+                } else {
+                    session.set_pip(PipState::Busy);
+                }
+            }
+            glib::ControlFlow::Continue
         });
-        self.inner.borrow_mut().reset_source = Some(src);
+        self.inner.borrow_mut().poll_source = Some(source);
     }
 
     /// Current working directory of the session's shell, derived from OSC 7
@@ -429,6 +469,30 @@ impl Session {
         inner.name = name.into();
         inner.tile_title.set_text(name);
         inner.card_title.set_text(name);
+    }
+}
+
+/// Check whether the shell is the foreground process of its terminal,
+/// i.e. waiting for user input rather than running a child command.
+fn is_shell_idle(pid: i32) -> bool {
+    let path = format!("/proc/{}/stat", pid);
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return true;
+    };
+    // /proc/[pid]/stat: pid (comm) state ppid pgrp session tty_nr tpgid ...
+    // comm may contain spaces/parens, so find the last ')'.
+    let Some(pos) = data.rfind(')') else {
+        return true;
+    };
+    let rest = &data[pos + 2..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // fields[2] = pgrp, fields[5] = tpgid (foreground process group of tty)
+    if fields.len() > 5 {
+        let pgrp: i32 = fields[2].parse().unwrap_or(0);
+        let tpgid: i32 = fields[5].parse().unwrap_or(-1);
+        pgrp == tpgid
+    } else {
+        true
     }
 }
 

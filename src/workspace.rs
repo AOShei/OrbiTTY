@@ -18,6 +18,8 @@ pub struct WorkspaceInner {
     /// All sessions, indexed in spawn order. The location of each is owned by Session.
     pub registry: Vec<Session>,
     pub next_session_id: u32,
+    /// Last focused session id, for restoring focus on tab switch.
+    pub last_focused_id: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -51,6 +53,7 @@ impl Workspace {
             sidebar,
             registry: Vec::new(),
             next_session_id: 1,
+            last_focused_id: None,
         }));
 
         let workspace = Workspace { inner };
@@ -61,8 +64,9 @@ impl Workspace {
         }
 
         // Focus first arena session if any.
-        if let Some(first) = workspace.inner.borrow().arena.session_by_index(0) {
-            workspace.focus_session(first.id());
+        let first_id = workspace.inner.borrow().arena.session_by_index(0).map(|s| s.id());
+        if let Some(id) = first_id {
+            workspace.focus_session(id);
         }
 
         workspace
@@ -117,12 +121,11 @@ impl Workspace {
                 SessionEvent::RequestDemote => ws.demote(id),
                 SessionEvent::RequestClose => ws.close_session(id),
                 SessionEvent::RequestClone => ws.clone_session(id),
-                SessionEvent::Focused => ws.focus_session(id),
-                SessionEvent::Activity => {
-                    if let Some(s) = ws.find(id) {
-                        s.pulse_activity();
-                    }
+                SessionEvent::RequestSwap(source_id) => {
+                    let arena = ws.inner.borrow().arena.clone();
+                    arena.swap_sessions(source_id, id);
                 }
+                SessionEvent::Focused => ws.focus_session(id),
                 SessionEvent::Bell => {
                     if let Some(s) = ws.find(id) {
                         s.raise_alert();
@@ -209,13 +212,30 @@ impl Workspace {
     }
 
     pub fn focus_session(&self, id: u32) {
-        let inner = self.inner.borrow();
-        for s in &inner.registry {
+        self.inner.borrow_mut().last_focused_id = Some(id);
+
+        // Clone sessions out so the borrow is dropped before any GTK calls
+        // (which can re-enter via signal handlers).
+        let sessions: Vec<Session> = self.inner.borrow().registry.clone();
+        for s in &sessions {
             s.set_focused(s.id() == id);
         }
-        if let Some(s) = inner.registry.iter().find(|s| s.id() == id) {
+        if let Some(s) = sessions.iter().find(|s| s.id() == id) {
             s.grab_focus();
         }
+    }
+
+    /// Restore focus to the last-focused session, or fall back to first arena session.
+    pub fn refocus(&self) {
+        let last = self.inner.borrow().last_focused_id;
+        if let Some(id) = last {
+            // Only refocus if the session still exists.
+            if self.find(id).is_some() {
+                self.focus_session(id);
+                return;
+            }
+        }
+        self.focus_index(1);
     }
 
     /// Focus the arena session at a 1-based index.

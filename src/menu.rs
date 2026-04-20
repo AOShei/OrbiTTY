@@ -35,6 +35,7 @@ fn build_menu_model() -> gio::Menu {
 
     let mid = gio::Menu::new();
     mid.append(Some("New _Terminal"), Some("win.new-session"));
+    mid.append(Some("_Rename Workspace"), Some("win.rename-workspace"));
     mid.append(Some("_New Window"), Some("app.new-window"));
     mid.append(Some("_Show All Tabs"), Some("win.tab-overview"));
     mid.append(Some("_Fullscreen"), Some("win.fullscreen"));
