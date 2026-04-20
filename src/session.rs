@@ -635,7 +635,7 @@ impl Session {
 
     fn start_polling(&self) {
         let weak = Rc::downgrade(&self.inner);
-        let source = glib::timeout_add_local(Duration::from_millis(500), move || {
+        let source = glib::timeout_add_local(Duration::from_millis(250), move || {
             let Some(inner_rc) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
