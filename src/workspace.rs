@@ -1,6 +1,6 @@
 use gtk::prelude::*;
 use gtk4 as gtk;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use crate::arena::{Arena, MAX_ACTIVE};
@@ -20,6 +20,9 @@ pub struct WorkspaceInner {
     pub next_session_id: u32,
     /// Last focused session id, for restoring focus on tab switch.
     pub last_focused_id: Option<u32>,
+    /// Guard flag: suppress DragHoverEnter/Leave events while a preview rebuild
+    /// is in progress (rebuild triggers spurious DropTarget enter/leave signals).
+    pub suppressing_hover: Rc<Cell<bool>>,
 }
 
 #[derive(Clone)]
@@ -55,6 +58,7 @@ impl Workspace {
             registry: Vec::new(),
             next_session_id: 1,
             last_focused_id: None,
+            suppressing_hover: Rc::new(Cell::new(false)),
         }));
 
         let workspace = Workspace { inner };
@@ -84,11 +88,12 @@ impl Workspace {
                     dt.connect_enter(move |_dt, _x, _y| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let arena = inner_rc.borrow().arena.clone();
+                            let guard = inner_rc.borrow().suppressing_hover.clone();
                             if !arena.is_full() {
-                                // Defer rebuild to avoid removing mapped widgets
-                                // during the DropTarget event handler.
                                 glib::idle_add_local_once(move || {
+                                    guard.set(true);
                                     arena.show_phantom();
+                                    guard.set(false);
                                 });
                             }
                         }
@@ -99,9 +104,12 @@ impl Workspace {
                     let weak = weak.clone();
                     dt.connect_leave(move |_dt| {
                         if let Some(inner_rc) = weak.upgrade() {
+                            let guard = inner_rc.borrow().suppressing_hover.clone();
                             let ws = Workspace { inner: inner_rc };
                             glib::idle_add_local_once(move || {
+                                guard.set(true);
                                 ws.clear_all_previews();
+                                guard.set(false);
                             });
                         }
                     });
@@ -155,8 +163,11 @@ impl Workspace {
                         let y = y;
                         if let Some(inner_rc) = weak.upgrade() {
                             let sidebar = inner_rc.borrow().sidebar.clone();
+                            let guard = inner_rc.borrow().suppressing_hover.clone();
                             glib::idle_add_local_once(move || {
+                                guard.set(true);
                                 sidebar.show_placeholder(y);
+                                guard.set(false);
                             });
                         }
                         gtk::gdk::DragAction::MOVE
@@ -176,9 +187,12 @@ impl Workspace {
                     let weak = weak.clone();
                     dt.connect_leave(move |_dt| {
                         if let Some(inner_rc) = weak.upgrade() {
+                            let guard = inner_rc.borrow().suppressing_hover.clone();
                             let ws = Workspace { inner: inner_rc };
                             glib::idle_add_local_once(move || {
+                                guard.set(true);
                                 ws.clear_all_previews();
+                                guard.set(false);
                             });
                         }
                     });
@@ -285,10 +299,17 @@ impl Workspace {
                     ws.clear_all_previews();
                 }
                 SessionEvent::DragHoverEnter(source_id) => {
-                    ws.handle_drag_hover_enter(source_id, id);
+                    // Skip if this event is a side-effect of a preview rebuild.
+                    let guard = ws.inner.borrow().suppressing_hover.clone();
+                    if !guard.get() {
+                        ws.handle_drag_hover_enter(source_id, id);
+                    }
                 }
                 SessionEvent::DragHoverLeave(source_id) => {
-                    ws.handle_drag_hover_leave(source_id, id);
+                    let guard = ws.inner.borrow().suppressing_hover.clone();
+                    if !guard.get() {
+                        ws.handle_drag_hover_leave(source_id, id);
+                    }
                 }
             }
         })))
@@ -631,9 +652,9 @@ impl Workspace {
     /// Deferred to idle to avoid restructuring the widget tree during
     /// DropTarget event handlers (which causes GTK unrealize assertions).
     fn handle_drag_hover_enter(&self, source_id: u32, target_id: u32) {
-        let (arena, sidebar) = {
+        let (arena, sidebar, guard) = {
             let inner = self.inner.borrow();
-            (inner.arena.clone(), inner.sidebar.clone())
+            (inner.arena.clone(), inner.sidebar.clone(), inner.suppressing_hover.clone())
         };
 
         let source_in_arena = arena.contains(source_id);
@@ -645,13 +666,17 @@ impl Workspace {
             // Arena → arena: preview the swap.
             (true, true, _, _) => {
                 glib::idle_add_local_once(move || {
+                    guard.set(true);
                     arena.preview_swap(source_id, target_id);
+                    guard.set(false);
                 });
             }
             // Sidebar → arena (has room): show phantom in n+1 layout.
             (_, true, true, _) if !arena.is_full() => {
                 glib::idle_add_local_once(move || {
+                    guard.set(true);
                     arena.show_phantom();
+                    guard.set(false);
                 });
             }
             // Sidebar → arena (full): drop-hover on tile is enough (handled by CSS).
@@ -659,7 +684,9 @@ impl Workspace {
             // Arena → sidebar card: preview arena without the source.
             (true, _, _, true) => {
                 glib::idle_add_local_once(move || {
+                    guard.set(true);
                     arena.preview_remove(source_id);
+                    guard.set(false);
                 });
             }
             _ => {}
@@ -671,7 +698,10 @@ impl Workspace {
         let weak = Rc::downgrade(&self.inner);
         glib::idle_add_local_once(move || {
             if let Some(inner_rc) = weak.upgrade() {
+                let guard = inner_rc.borrow().suppressing_hover.clone();
+                guard.set(true);
                 Workspace { inner: inner_rc }.clear_all_previews();
+                guard.set(false);
             }
         });
     }
