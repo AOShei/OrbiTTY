@@ -374,9 +374,14 @@ impl Workspace {
                 }
                 SessionEvent::DragStarted => {
                     ws.inner.borrow().root.add_css_class("dragging");
+                    let sidebar = ws.inner.borrow().sidebar.clone();
+                    if sidebar.contains(id) {
+                        sidebar.set_dragging_id(id);
+                    }
                 }
                 SessionEvent::DragEnded => {
                     ws.inner.borrow().root.remove_css_class("dragging");
+                    ws.inner.borrow().sidebar.clear_dragging_id();
                     // Clean up any lingering drop-hover classes.
                     let sessions: Vec<Session> = ws.inner.borrow().registry.clone();
                     for s in &sessions {

@@ -1,6 +1,6 @@
 use gtk::prelude::*;
 use gtk4 as gtk;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::session::Session;
@@ -14,6 +14,8 @@ pub struct Sidebar {
     pub sessions: Rc<RefCell<Vec<Session>>>,
     /// Placeholder widget shown during drag-over.
     placeholder: Rc<RefCell<Option<gtk::Box>>>,
+    /// The session id currently being dragged (for smart placeholder positioning).
+    dragging_id: Rc<Cell<Option<u32>>>,
 }
 
 impl Sidebar {
@@ -52,6 +54,7 @@ impl Sidebar {
             scroller,
             sessions: Rc::new(RefCell::new(Vec::new())),
             placeholder: Rc::new(RefCell::new(None)),
+            dragging_id: Rc::new(Cell::new(None)),
         }
     }
 
@@ -110,11 +113,19 @@ impl Sidebar {
     }
 
     /// Reorder: move session `source_id` to the given index in the list.
+    /// `index` is the target position in the original (pre-removal) list.
     pub fn reorder_to_index(&self, source_id: u32, index: usize) {
         let mut v = self.sessions.borrow_mut();
         let Some(src_pos) = v.iter().position(|s| s.id() == source_id) else { return };
+        // Adjust target index: if source was before target, removing it shifts
+        // everything after it down by one.
+        let adjusted = if src_pos < index {
+            index.saturating_sub(1)
+        } else {
+            index
+        };
         let session = v.remove(src_pos);
-        let clamped = index.min(v.len());
+        let clamped = adjusted.min(v.len());
         v.insert(clamped, session.clone());
         drop(v);
         self.list.remove(&session.card_frame());
@@ -156,16 +167,43 @@ impl Sidebar {
         self.scroller.clone()
     }
 
+    /// Set the session id currently being dragged within the sidebar.
+    pub fn set_dragging_id(&self, id: u32) {
+        self.dragging_id.set(Some(id));
+    }
+
+    /// Clear the dragging session id.
+    pub fn clear_dragging_id(&self) {
+        self.dragging_id.set(None);
+    }
+
     /// Show a drop placeholder in the sidebar at the given y coordinate.
     /// The placeholder is inserted between existing cards at the closest gap.
     pub fn show_placeholder(&self, y: f64) {
         let placeholder = self.get_or_create_placeholder();
-        // Remove from current position before reinserting.
         if placeholder.parent().is_some() {
             self.list.remove(&placeholder);
         }
 
         let insert_idx = self.find_insert_index(y);
+        // Suppress placeholder if it would land immediately before or after the
+        // dragged card (those positions are no-ops).
+        if let Some(drag_id) = self.dragging_id.get() {
+            let sessions = self.sessions.borrow();
+            if let Some(drag_pos) = sessions.iter().position(|s| s.id() == drag_id) {
+                let effective = insert_idx.unwrap_or(0);
+                // insert_idx None → position 0 (before first card)
+                // insert_idx Some(i) → position i+1 (after card i)
+                let target_pos = if insert_idx.is_none() { 0 } else { effective + 1 };
+                if target_pos == drag_pos || target_pos == drag_pos + 1 {
+                    // No-op position — hide placeholder.
+                    placeholder.set_visible(false);
+                    *self.placeholder.borrow_mut() = Some(placeholder);
+                    return;
+                }
+            }
+        }
+
         self.list.insert_child_after(&placeholder, self.child_at_index(insert_idx).as_ref());
         placeholder.set_visible(true);
         *self.placeholder.borrow_mut() = Some(placeholder);
@@ -178,7 +216,20 @@ impl Sidebar {
             self.list.remove(&placeholder);
         }
         let insert_idx = self.find_insert_index(y);
+
+        if let Some(drag_id) = self.dragging_id.get() {
+            let sessions = self.sessions.borrow();
+            if let Some(drag_pos) = sessions.iter().position(|s| s.id() == drag_id) {
+                let target_pos = if insert_idx.is_none() { 0 } else { insert_idx.unwrap() + 1 };
+                if target_pos == drag_pos || target_pos == drag_pos + 1 {
+                    placeholder.set_visible(false);
+                    return;
+                }
+            }
+        }
+
         self.list.insert_child_after(&placeholder, self.child_at_index(insert_idx).as_ref());
+        placeholder.set_visible(true);
     }
 
     /// Hide and detach the placeholder.
