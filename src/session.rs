@@ -105,14 +105,6 @@ impl Session {
 
         // Sync VTE colors with the Adwaita color scheme.
         apply_vte_theme(&vte);
-        {
-            let vte_weak = vte.downgrade();
-            adw::StyleManager::default().connect_dark_notify(move |_sm| {
-                if let Some(vte) = vte_weak.upgrade() {
-                    apply_vte_theme(&vte);
-                }
-            });
-        }
 
         // --- Arena tile shell ---
         let tile_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -284,6 +276,20 @@ impl Session {
         }));
 
         let session = Session { inner };
+
+        // Update VTE colors + elevated header tint when theme changes.
+        {
+            let vte_weak = vte.downgrade();
+            let inner_weak = Rc::downgrade(&session.inner);
+            adw::StyleManager::default().connect_dark_notify(move |_sm| {
+                if let Some(vte) = vte_weak.upgrade() {
+                    apply_vte_theme(&vte);
+                }
+                if let Some(inner_rc) = inner_weak.upgrade() {
+                    Session { inner: inner_rc }.refresh_elevated_theme();
+                }
+            });
+        }
 
         // Wire events.
         {
@@ -600,6 +606,24 @@ impl Session {
             } else {
                 header.remove_css_class(add);
             }
+        }
+    }
+
+    /// Swap elevated-dark ↔ elevated-light when the theme changes.
+    fn refresh_elevated_theme(&self) {
+        let inner = self.inner.borrow();
+        if !inner.elevated {
+            return;
+        }
+        let dark = adw::StyleManager::default().is_dark();
+        let (add, remove) = if dark {
+            ("elevated-dark", "elevated-light")
+        } else {
+            ("elevated-light", "elevated-dark")
+        };
+        for header in [&inner.tile_header, &inner.card_header] {
+            header.remove_css_class(remove);
+            header.add_css_class(add);
         }
     }
 
