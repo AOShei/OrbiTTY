@@ -89,11 +89,16 @@ impl Workspace {
                 );
                 {
                     let weak = weak.clone();
-                    dt.connect_enter(move |_dt, x, y| {
+                    dt.connect_enter(move |dt, x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
                             if guard.get() { return gtk::gdk::DragAction::MOVE; }
                             let arena = inner_rc.borrow().arena.clone();
+                            // Only show phantom for sidebar→arena drags, not arena→arena.
+                            let source_in_arena = crate::session::extract_source_id(dt)
+                                .map(|sid| arena.contains(sid))
+                                .unwrap_or(false);
+                            if source_in_arena { return gtk::gdk::DragAction::MOVE; }
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             gen_rc.set(gen_rc.get().wrapping_add(1));
                             let gen = gen_rc.get();
@@ -115,11 +120,15 @@ impl Workspace {
                 }
                 {
                     let weak = weak.clone();
-                    dt.connect_motion(move |_dt, x, y| {
+                    dt.connect_motion(move |dt, x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
                             if guard.get() { return gtk::gdk::DragAction::MOVE; }
                             let arena = inner_rc.borrow().arena.clone();
+                            let source_in_arena = crate::session::extract_source_id(dt)
+                                .map(|sid| arena.contains(sid))
+                                .unwrap_or(false);
+                            if source_in_arena { return gtk::gdk::DragAction::MOVE; }
                             if !arena.is_full() {
                                 let slot = arena.slot_from_coords(x, y);
                                 if slot != arena.phantom_slot() || !arena.has_phantom() {

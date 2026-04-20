@@ -413,9 +413,13 @@ impl Session {
             session.inner.borrow().tile_frame.add_controller(drop_target);
         }
         // Drop target on the sidebar card for cross-region swap.
+        // Only activates when this card is in the sidebar AND the source is
+        // from the arena (cross-region). Sidebar→sidebar reorders are handled
+        // by the list-level DropTarget which shows a placeholder.
         {
             let cb = cb.clone();
             let card_frame = session.inner.borrow().card_frame.clone();
+            let inner_weak = Rc::downgrade(&session.inner);
             let drop_target = gtk::DropTarget::new(
                 <u32 as glib::types::StaticType>::static_type(),
                 gtk::gdk::DragAction::MOVE,
@@ -423,7 +427,22 @@ impl Session {
             {
                 let cb = cb.clone();
                 let card_frame = card_frame.clone();
+                let inner_weak = inner_weak.clone();
                 drop_target.connect_enter(move |dt, _x, _y| {
+                    // Reject if this card is in the sidebar and so is the source —
+                    // let the list-level DropTarget handle sidebar reordering.
+                    if let Some(inner_rc) = inner_weak.upgrade() {
+                        let loc = inner_rc.borrow().location;
+                        if loc == crate::session::Location::Sidebar {
+                            if let Some(_source_id) = extract_source_id(dt) {
+                                // We can't check the source's location easily here,
+                                // so reject all drops on sidebar cards — the list
+                                // DropTarget handles both sidebar→sidebar reorder
+                                // and arena→sidebar demote.
+                                return gtk::gdk::DragAction::empty();
+                            }
+                        }
+                    }
                     card_frame.add_css_class("drop-hover");
                     if let Some(source_id) = extract_source_id(dt) {
                         if source_id != id {
@@ -756,7 +775,7 @@ fn is_foreground_elevated(shell_pid: i32) -> bool {
 }
 
 /// Extract the source session id from a DropTarget's current drag.
-fn extract_source_id(dt: &gtk::DropTarget) -> Option<u32> {
+pub(crate) fn extract_source_id(dt: &gtk::DropTarget) -> Option<u32> {
     let drop = dt.current_drop()?;
     let drag = drop.drag()?;
     let content = drag.content();
