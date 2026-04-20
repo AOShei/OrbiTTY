@@ -1,6 +1,6 @@
 use gtk::prelude::*;
 use gtk4 as gtk;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::session::Session;
@@ -16,8 +16,8 @@ pub struct Arena {
     pub split_horizontal: Rc<RefCell<bool>>,
     /// Placeholder widget shown during drag preview.
     phantom: Rc<RefCell<Option<gtk::Box>>>,
-    /// Saved session order before a preview swap; restored on drag leave.
-    saved_order: Rc<RefCell<Option<Vec<u32>>>>,
+    /// Which slot index the phantom occupies (for position-aware insertion).
+    phantom_index: Rc<Cell<usize>>,
 }
 
 impl Arena {
@@ -41,7 +41,7 @@ impl Arena {
             empty_state,
             split_horizontal: Rc::new(RefCell::new(false)),
             phantom: Rc::new(RefCell::new(None)),
-            saved_order: Rc::new(RefCell::new(None)),
+            phantom_index: Rc::new(Cell::new(0)),
         }
     }
 
@@ -144,15 +144,27 @@ impl Arena {
         self.sessions.borrow().iter().map(|s| s.id()).collect()
     }
 
-    /// Show a phantom placeholder in the arena, previewing the n+1 layout.
-    /// The phantom appears in the last slot.
-    pub fn show_phantom(&self) {
+    /// Show a phantom placeholder at the given slot index, previewing the n+1 layout.
+    pub fn show_phantom_at(&self, slot: usize) {
         if self.sessions.borrow().len() >= MAX_ACTIVE {
             return;
         }
         let phantom = self.get_or_create_phantom();
         phantom.set_visible(true);
         *self.phantom.borrow_mut() = Some(phantom);
+        self.phantom_index.set(slot);
+        self.rebuild();
+    }
+
+    /// Update phantom position without recreating it. No-op if phantom is not shown.
+    pub fn move_phantom_to(&self, slot: usize) {
+        if self.phantom.borrow().is_none() {
+            return;
+        }
+        if self.phantom_index.get() == slot {
+            return;
+        }
+        self.phantom_index.set(slot);
         self.rebuild();
     }
 
@@ -168,47 +180,60 @@ impl Arena {
         }
     }
 
-    /// Preview a swap between two arena sessions.
-    pub fn preview_swap(&self, id_a: u32, id_b: u32) {
+    /// Return the slot index where the phantom is currently shown.
+    pub fn phantom_slot(&self) -> usize {
+        self.phantom_index.get()
+    }
+
+    /// Compute which slot index a point (x, y) in grid coordinates maps to,
+    /// given that the total tile count will be `current_sessions + 1` (phantom).
+    pub fn slot_from_coords(&self, x: f64, y: f64) -> usize {
+        let w = self.grid.width() as f64;
+        let h = self.grid.height() as f64;
+        if w <= 0.0 || h <= 0.0 {
+            return 0;
+        }
+        let horiz = *self.split_horizontal.borrow();
+        let count = self.sessions.borrow().len();
+        let total = count + 1; // including phantom
+        match total {
+            0 | 1 => 0,
+            2 => {
+                if horiz {
+                    if x < w / 2.0 { 0 } else { 1 }
+                } else {
+                    if y < h / 2.0 { 0 } else { 1 }
+                }
+            }
+            3 => {
+                if horiz {
+                    // col 0 = big, col 1 top/bottom = small
+                    if x < w / 2.0 { 0 }
+                    else if y < h / 2.0 { 1 }
+                    else { 2 }
+                } else {
+                    // row 0 = big, row 1 left/right = small
+                    if y < h / 2.0 { 0 }
+                    else if x < w / 2.0 { 1 }
+                    else { 2 }
+                }
+            }
+            _ => {
+                // 2×2
+                let col = if x < w / 2.0 { 0 } else { 1 };
+                let row = if y < h / 2.0 { 0 } else { 1 };
+                (row * 2 + col) as usize
+            }
+        }
+    }
+
+    /// Insert a session at a specific index in the arena. Clamps to valid range.
+    pub fn insert_at(&self, index: usize, session: Session) {
         let mut v = self.sessions.borrow_mut();
-        // Save original order if not already saved.
-        if self.saved_order.borrow().is_none() {
-            *self.saved_order.borrow_mut() = Some(v.iter().map(|s| s.id()).collect());
-        }
-        let pos_a = v.iter().position(|s| s.id() == id_a);
-        let pos_b = v.iter().position(|s| s.id() == id_b);
-        if let (Some(a), Some(b)) = (pos_a, pos_b) {
-            v.swap(a, b);
-        }
+        let clamped = index.min(v.len());
+        v.insert(clamped, session);
         drop(v);
         self.rebuild();
-    }
-
-    /// Preview removal: temporarily hide a session and rebuild with n-1 layout.
-    /// The session is NOT actually removed — it stays in the vec but its tile
-    /// is excluded from the grid.
-    pub fn preview_remove(&self, id: u32) {
-        let v = self.sessions.borrow();
-        if !v.iter().any(|s| s.id() == id) {
-            return;
-        }
-        // Save original order if not already saved.
-        if self.saved_order.borrow().is_none() {
-            *self.saved_order.borrow_mut() = Some(v.iter().map(|s| s.id()).collect());
-        }
-        drop(v);
-        self.rebuild_excluding(id);
-    }
-
-    /// Restore session order to what it was before preview_swap/preview_remove.
-    pub fn restore_preview(&self) {
-        let saved = self.saved_order.borrow_mut().take();
-        if let Some(order) = saved {
-            let mut v = self.sessions.borrow_mut();
-            v.sort_by_key(|s| order.iter().position(|&oid| oid == s.id()).unwrap_or(usize::MAX));
-            drop(v);
-            self.rebuild();
-        }
     }
 
     fn get_or_create_phantom(&self) -> gtk::Box {
@@ -254,33 +279,16 @@ impl Arena {
             return;
         }
 
-        // Collect widgets: session tile_frames + optional phantom at the end.
+        // Collect session tile_frames.
         let mut widgets: Vec<gtk::Widget> = sessions
             .iter()
             .map(|s| s.tile_frame().upcast::<gtk::Widget>())
             .collect();
+
+        // Insert phantom at the tracked position.
         if let Some(ref p) = *phantom {
-            widgets.push(p.clone().upcast::<gtk::Widget>());
-        }
-
-        let horizontal = *self.split_horizontal.borrow();
-        self.attach_tiled(&widgets, horizontal);
-    }
-
-    /// Rebuild the grid excluding one session (for preview_remove).
-    fn rebuild_excluding(&self, exclude_id: u32) {
-        self.clear_grid();
-
-        let sessions = self.sessions.borrow();
-        let widgets: Vec<gtk::Widget> = sessions
-            .iter()
-            .filter(|s| s.id() != exclude_id)
-            .map(|s| s.tile_frame().upcast::<gtk::Widget>())
-            .collect();
-
-        if widgets.is_empty() {
-            self.grid.attach(&self.empty_state, 0, 0, 2, 2);
-            return;
+            let idx = self.phantom_index.get().min(widgets.len());
+            widgets.insert(idx, p.clone().upcast::<gtk::Widget>());
         }
 
         let horizontal = *self.split_horizontal.borrow();

@@ -85,16 +85,37 @@ impl Workspace {
                 );
                 {
                     let weak = weak.clone();
-                    dt.connect_enter(move |_dt, _x, _y| {
+                    dt.connect_enter(move |_dt, x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let arena = inner_rc.borrow().arena.clone();
                             let guard = inner_rc.borrow().suppressing_hover.clone();
                             if !arena.is_full() {
+                                let slot = arena.slot_from_coords(x, y);
                                 glib::idle_add_local_once(move || {
                                     guard.set(true);
-                                    arena.show_phantom();
+                                    arena.show_phantom_at(slot);
                                     guard.set(false);
                                 });
+                            }
+                        }
+                        gtk::gdk::DragAction::MOVE
+                    });
+                }
+                {
+                    let weak = weak.clone();
+                    dt.connect_motion(move |_dt, x, y| {
+                        if let Some(inner_rc) = weak.upgrade() {
+                            let arena = inner_rc.borrow().arena.clone();
+                            let guard = inner_rc.borrow().suppressing_hover.clone();
+                            if !arena.is_full() {
+                                let slot = arena.slot_from_coords(x, y);
+                                if slot != arena.phantom_slot() {
+                                    glib::idle_add_local_once(move || {
+                                        guard.set(true);
+                                        arena.move_phantom_to(slot);
+                                        guard.set(false);
+                                    });
+                                }
                             }
                         }
                         gtk::gdk::DragAction::MOVE
@@ -122,9 +143,17 @@ impl Workspace {
                         };
                         if let Some(inner_rc) = weak.upgrade() {
                             let ws = Workspace { inner: inner_rc };
-                            if ws.inner.borrow().sidebar.contains(source_id) {
-                                ws.clear_all_previews();
-                                ws.promote(source_id);
+                            let (arena, sidebar) = {
+                                let inner = ws.inner.borrow();
+                                (inner.arena.clone(), inner.sidebar.clone())
+                            };
+                            let slot = arena.phantom_slot();
+                            ws.clear_all_previews();
+                            if sidebar.contains(source_id) {
+                                ws.promote_at(source_id, Some(slot));
+                            } else if arena.contains(source_id) {
+                                // Arena session dropped on grid background: no-op
+                                // (arena→arena swap handled by per-tile DropTarget).
                             }
                         }
                         true
@@ -327,9 +356,14 @@ impl Workspace {
     /// Promote a sidebar session into the arena. If arena is full, swap with
     /// the currently focused arena session (fallback: oldest).
     pub fn promote(&self, id: u32) {
+        self.promote_at(id, None);
+    }
+
+    /// Promote a sidebar session into the arena at a specific slot index.
+    /// If `slot` is None, appends to the end.
+    pub fn promote_at(&self, id: u32, slot: Option<usize>) {
         let inner = self.inner.borrow();
         if inner.arena.contains(id) {
-            // Already in arena: just focus.
             drop(inner);
             self.focus_session(id);
             return;
@@ -343,7 +377,10 @@ impl Workspace {
         };
 
         if arena.count() < MAX_ACTIVE {
-            arena.add(incoming.clone());
+            match slot {
+                Some(idx) => arena.insert_at(idx, incoming.clone()),
+                None => { arena.add(incoming.clone()); }
+            }
             incoming.place_in_arena();
             self.focus_session(incoming.id());
             return;
@@ -388,19 +425,20 @@ impl Workspace {
         let target_in_sidebar = sidebar.contains(target_id);
 
         match (source_in_arena, target_in_arena, source_in_sidebar, target_in_sidebar) {
-            // Arena → arena reorder (existing behavior).
+            // Arena → arena reorder.
             (true, true, _, _) => arena.swap_sessions(source_id, target_id),
 
             // Sidebar → arena.
             (_, true, true, _) => {
                 if !arena.is_full() {
-                    // Room available: join the arena, tiles reshape via rebuild.
-                    self.promote(source_id);
+                    // Room available: insert at the target's position.
+                    let target_idx = arena.session_ids().iter().position(|&x| x == target_id);
+                    let slot = target_idx.unwrap_or(arena.count());
+                    self.promote_at(source_id, Some(slot));
                 } else {
                     // Arena full: cross-region swap at the target tile's slot.
                     let Some(dragged) = sidebar.remove(source_id) else { return };
                     let Some(evicted) = arena.swap_at(target_id, dragged.clone()) else {
-                        // Should be unreachable given target_in_arena; re-add dragged defensively.
                         sidebar.add(dragged);
                         return;
                     };
@@ -436,7 +474,11 @@ impl Workspace {
                 });
             }
 
-            // Sidebar → sidebar, or unknown ids: no-op.
+            // Sidebar → sidebar: reorder cards.
+            (_, _, true, true) => {
+                sidebar.reorder_before(source_id, target_id);
+            }
+
             _ => {}
         }
     }
@@ -657,40 +699,20 @@ impl Workspace {
             (inner.arena.clone(), inner.sidebar.clone(), inner.suppressing_hover.clone())
         };
 
-        let source_in_arena = arena.contains(source_id);
         let source_in_sidebar = sidebar.contains(source_id);
         let target_in_arena = arena.contains(target_id);
-        let target_in_sidebar = sidebar.contains(target_id);
 
-        match (source_in_arena, target_in_arena, source_in_sidebar, target_in_sidebar) {
-            // Arena → arena: preview the swap.
-            (true, true, _, _) => {
-                glib::idle_add_local_once(move || {
-                    guard.set(true);
-                    arena.preview_swap(source_id, target_id);
-                    guard.set(false);
-                });
-            }
-            // Sidebar → arena (has room): show phantom in n+1 layout.
-            (_, true, true, _) if !arena.is_full() => {
-                glib::idle_add_local_once(move || {
-                    guard.set(true);
-                    arena.show_phantom();
-                    guard.set(false);
-                });
-            }
-            // Sidebar → arena (full): drop-hover on tile is enough (handled by CSS).
-            (_, true, true, _) => {}
-            // Arena → sidebar card: preview arena without the source.
-            (true, _, _, true) => {
-                glib::idle_add_local_once(move || {
-                    guard.set(true);
-                    arena.preview_remove(source_id);
-                    guard.set(false);
-                });
-            }
-            _ => {}
+        // Sidebar → arena (has room): show phantom at the target tile's slot.
+        if source_in_sidebar && target_in_arena && !arena.is_full() {
+            let slot = arena.session_ids().iter().position(|&x| x == target_id).unwrap_or(0);
+            glib::idle_add_local_once(move || {
+                guard.set(true);
+                arena.show_phantom_at(slot);
+                guard.set(false);
+            });
         }
+        // Arena→arena and other cases: CSS drop-hover class (already applied
+        // in session.rs DropTarget handlers) provides the visual feedback.
     }
 
     /// Handle drag hover leaving a session's drop zone.
@@ -710,7 +732,6 @@ impl Workspace {
     fn clear_all_previews(&self) {
         let inner = self.inner.borrow();
         inner.arena.hide_phantom();
-        inner.arena.restore_preview();
         inner.sidebar.hide_placeholder();
     }
 }

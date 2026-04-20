@@ -84,6 +84,26 @@ impl Sidebar {
         self.sessions.borrow().iter().map(|s| s.id()).collect()
     }
 
+    /// Reorder: move session `source_id` to the position of `target_id`.
+    pub fn reorder_before(&self, source_id: u32, target_id: u32) {
+        let mut v = self.sessions.borrow_mut();
+        let Some(src_pos) = v.iter().position(|s| s.id() == source_id) else { return };
+        let session = v.remove(src_pos);
+        let tgt_pos = v.iter().position(|s| s.id() == target_id).unwrap_or(v.len());
+        v.insert(tgt_pos, session.clone());
+        drop(v);
+        // Re-order the visual list: remove card and re-insert at the new position.
+        self.list.remove(&session.card_frame());
+        let sessions = self.sessions.borrow();
+        if tgt_pos == 0 {
+            self.list.prepend(&session.card_frame());
+        } else if let Some(prev) = sessions.get(tgt_pos.saturating_sub(1)) {
+            self.list.insert_child_after(&session.card_frame(), Some(&prev.card_frame()));
+        } else {
+            self.list.append(&session.card_frame());
+        }
+    }
+
     #[allow(dead_code)]
     pub fn scroller(&self) -> gtk::ScrolledWindow {
         self.scroller.clone()
