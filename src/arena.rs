@@ -18,6 +18,10 @@ pub struct Arena {
     phantom: Rc<RefCell<Option<gtk::Box>>>,
     /// Which slot index the phantom occupies (for position-aware insertion).
     phantom_index: Rc<Cell<usize>>,
+    /// Session temporarily hidden for arena-shrink preview (drag to sidebar).
+    preview_removed: Rc<RefCell<Option<u32>>>,
+    /// Pair of session ids currently preview-swapped (arena→arena drag).
+    preview_swapped: Rc<RefCell<Option<(u32, u32)>>>,
 }
 
 impl Arena {
@@ -42,6 +46,8 @@ impl Arena {
             split_horizontal: Rc::new(RefCell::new(false)),
             phantom: Rc::new(RefCell::new(None)),
             phantom_index: Rc::new(Cell::new(0)),
+            preview_removed: Rc::new(RefCell::new(None)),
+            preview_swapped: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -202,6 +208,126 @@ impl Arena {
         self.phantom.borrow().is_some()
     }
 
+    // --- Arena shrink preview (drag arena tile → sidebar) ---
+
+    /// Hide a session from the arena layout to preview what n-1 looks like.
+    pub fn preview_remove(&self, id: u32) {
+        if *self.preview_removed.borrow() == Some(id) {
+            return;
+        }
+        *self.preview_removed.borrow_mut() = Some(id);
+        self.rebuild();
+    }
+
+    /// Restore a session hidden by `preview_remove`.
+    pub fn restore_remove(&self) {
+        if self.preview_removed.borrow_mut().take().is_some() {
+            self.rebuild();
+        }
+    }
+
+    /// Whether a remove preview is active.
+    pub fn has_preview_remove(&self) -> bool {
+        self.preview_removed.borrow().is_some()
+    }
+
+    // --- Arena swap preview (arena → arena drag) ---
+
+    /// Preview swapping two arena sessions. Undoes any previous preview swap
+    /// and performs a single rebuild.
+    pub fn preview_swap(&self, id_a: u32, id_b: u32) {
+        {
+            let current = self.preview_swapped.borrow();
+            if let Some((a, b)) = *current {
+                if (a == id_a && b == id_b) || (a == id_b && b == id_a) {
+                    return; // Already previewing this swap.
+                }
+            }
+        }
+        // Undo the previous preview swap in-place (no rebuild yet).
+        {
+            let old = self.preview_swapped.borrow_mut().take();
+            if let Some((old_a, old_b)) = old {
+                let mut v = self.sessions.borrow_mut();
+                let pos_a = v.iter().position(|s| s.id() == old_a);
+                let pos_b = v.iter().position(|s| s.id() == old_b);
+                if let (Some(a), Some(b)) = (pos_a, pos_b) {
+                    v.swap(a, b);
+                }
+            }
+        }
+        // Apply the new preview swap.
+        {
+            let mut v = self.sessions.borrow_mut();
+            let pos_a = v.iter().position(|s| s.id() == id_a);
+            let pos_b = v.iter().position(|s| s.id() == id_b);
+            if let (Some(a), Some(b)) = (pos_a, pos_b) {
+                v.swap(a, b);
+                drop(v);
+                *self.preview_swapped.borrow_mut() = Some((id_a, id_b));
+                self.rebuild();
+            }
+        }
+    }
+
+    /// Undo a preview swap, restoring original positions.
+    pub fn undo_preview_swap(&self) {
+        let ids = self.preview_swapped.borrow_mut().take();
+        if let Some((id_a, id_b)) = ids {
+            let mut v = self.sessions.borrow_mut();
+            let pos_a = v.iter().position(|s| s.id() == id_a);
+            let pos_b = v.iter().position(|s| s.id() == id_b);
+            if let (Some(a), Some(b)) = (pos_a, pos_b) {
+                v.swap(a, b);
+            }
+            drop(v);
+            self.rebuild();
+        }
+    }
+
+    /// Commit the preview swap (keep current positions, clear preview state).
+    pub fn commit_preview_swap(&self) {
+        *self.preview_swapped.borrow_mut() = None;
+    }
+
+    /// Whether a swap preview is active.
+    pub fn has_preview_swap(&self) -> bool {
+        self.preview_swapped.borrow().is_some()
+    }
+
+    /// Clear all preview states (phantom, remove, swap).
+    pub fn clear_all_previews(&self) {
+        let had_any = self.phantom.borrow().is_some()
+            || self.preview_removed.borrow().is_some()
+            || self.preview_swapped.borrow().is_some();
+
+        // Hide phantom.
+        if let Some(phantom) = self.phantom.borrow().as_ref() {
+            phantom.set_visible(false);
+        }
+        *self.phantom.borrow_mut() = None;
+
+        // Restore removed session.
+        *self.preview_removed.borrow_mut() = None;
+
+        // Undo swap in-place.
+        {
+            let ids = self.preview_swapped.borrow_mut().take();
+            if let Some((id_a, id_b)) = ids {
+                let mut v = self.sessions.borrow_mut();
+                let pos_a = v.iter().position(|s| s.id() == id_a);
+                let pos_b = v.iter().position(|s| s.id() == id_b);
+                if let (Some(a), Some(b)) = (pos_a, pos_b) {
+                    v.swap(a, b);
+                }
+            }
+        }
+
+        if had_any {
+            self.rebuild();
+        }
+    }
+
     /// Compute which slot index a point (x, y) in grid coordinates maps to,
     /// given that the total tile count will be `current_sessions + 1` (phantom).
     pub fn slot_from_coords(&self, x: f64, y: f64) -> usize {
@@ -287,20 +413,22 @@ impl Arena {
 
         let sessions = self.sessions.borrow();
         let phantom = self.phantom.borrow();
-        let count = sessions.len();
+        let removed_id = *self.preview_removed.borrow();
+
+        // Collect visible session tile_frames (skip preview-removed session).
+        let mut widgets: Vec<gtk::Widget> = sessions
+            .iter()
+            .filter(|s| removed_id.map_or(true, |rid| s.id() != rid))
+            .map(|s| s.tile_frame().upcast::<gtk::Widget>())
+            .collect();
+
         let has_phantom = phantom.is_some();
-        let total = count + if has_phantom { 1 } else { 0 };
+        let total = widgets.len() + if has_phantom { 1 } else { 0 };
 
         if total == 0 {
             self.grid.attach(&self.empty_state, 0, 0, 2, 2);
             return;
         }
-
-        // Collect session tile_frames.
-        let mut widgets: Vec<gtk::Widget> = sessions
-            .iter()
-            .map(|s| s.tile_frame().upcast::<gtk::Widget>())
-            .collect();
 
         // Insert phantom at the tracked position.
         if let Some(ref p) = *phantom {

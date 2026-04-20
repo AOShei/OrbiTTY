@@ -165,7 +165,9 @@ impl Workspace {
                                     if gen_rc.get() != gen { return; }
                                     guard.set(true);
                                     ws.clear_all_previews();
-                                    guard.set(false);
+                                    glib::idle_add_local_once(move || {
+                                        guard.set(false);
+                                    });
                                 },
                             );
                         }
@@ -224,21 +226,34 @@ impl Workspace {
                 );
                 {
                     let weak = weak.clone();
-                    dt.connect_enter(move |_dt, _x, y| {
+                    dt.connect_enter(move |dt, _x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
                             if guard.get() { return gtk::gdk::DragAction::MOVE; }
                             let sidebar = inner_rc.borrow().sidebar.clone();
+                            let arena = inner_rc.borrow().arena.clone();
                             let scroll_y = sidebar.scroller_widget().vadjustment().value();
                             let list_y = y + scroll_y;
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             gen_rc.set(gen_rc.get().wrapping_add(1));
                             let gen = gen_rc.get();
+                            // If source is an arena session, preview the shrink.
+                            let source_id = crate::session::extract_source_id(dt);
+                            let source_in_arena = source_id
+                                .map(|sid| arena.contains(sid))
+                                .unwrap_or(false);
                             glib::idle_add_local_once(move || {
                                 if gen_rc.get() != gen { return; }
                                 guard.set(true);
+                                if source_in_arena {
+                                    if let Some(sid) = source_id {
+                                        arena.preview_remove(sid);
+                                    }
+                                }
                                 sidebar.show_placeholder(list_y);
-                                guard.set(false);
+                                glib::idle_add_local_once(move || {
+                                    guard.set(false);
+                                });
                             });
                         }
                         gtk::gdk::DragAction::MOVE
@@ -271,7 +286,9 @@ impl Workspace {
                                 if gen_rc.get() != gen { return; }
                                 guard.set(true);
                                 ws.clear_all_previews();
-                                guard.set(false);
+                                glib::idle_add_local_once(move || {
+                                    guard.set(false);
+                                });
                             });
                         }
                     });
@@ -495,7 +512,14 @@ impl Workspace {
 
         match (source_in_arena, target_in_arena, source_in_sidebar, target_in_sidebar) {
             // Arena → arena reorder.
-            (true, true, _, _) => arena.swap_sessions(source_id, target_id),
+            (true, true, _, _) => {
+                if arena.has_preview_swap() {
+                    // Preview already shows the swapped layout — just commit it.
+                    arena.commit_preview_swap();
+                } else {
+                    arena.swap_sessions(source_id, target_id);
+                }
+            }
 
             // Sidebar → arena.
             (_, true, true, _) => {
@@ -775,6 +799,7 @@ impl Workspace {
         gen_rc.set(gen_rc.get().wrapping_add(1));
         let gen = gen_rc.get();
 
+        let source_in_arena = arena.contains(source_id);
         let source_in_sidebar = sidebar.contains(source_id);
         let target_in_arena = arena.contains(target_id);
 
@@ -785,7 +810,19 @@ impl Workspace {
                 if gen_rc.get() != gen { return; }
                 guard.set(true);
                 arena.ensure_phantom_at(slot);
-                // Defer guard unset so post-rebuild events are suppressed.
+                glib::idle_add_local_once(move || {
+                    guard.set(false);
+                });
+            });
+            return;
+        }
+
+        // Arena → arena: preview swap.
+        if source_in_arena && target_in_arena && source_id != target_id {
+            glib::idle_add_local_once(move || {
+                if gen_rc.get() != gen { return; }
+                guard.set(true);
+                arena.preview_swap(source_id, target_id);
                 glib::idle_add_local_once(move || {
                     guard.set(false);
                 });
@@ -850,7 +887,7 @@ impl Workspace {
     /// Reset all drag-related visual previews to their normal state.
     fn clear_all_previews(&self) {
         let inner = self.inner.borrow();
-        inner.arena.hide_phantom();
+        inner.arena.clear_all_previews();
         inner.sidebar.hide_placeholder();
     }
 }
