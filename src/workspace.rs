@@ -308,6 +308,9 @@ impl Workspace {
                             ws.clear_all_previews();
                             if arena.contains(source_id) {
                                 ws.demote(source_id);
+                                // demote() appends to the end — move to the
+                                // position the placeholder was showing.
+                                sidebar.reorder_to_index(source_id, insert_idx);
                             } else if sidebar.contains(source_id) {
                                 sidebar.reorder_to_index(source_id, insert_idx);
                             }
