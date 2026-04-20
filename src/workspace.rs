@@ -83,18 +83,14 @@ impl Workspace {
                     let weak = weak.clone();
                     dt.connect_enter(move |_dt, _x, _y| {
                         if let Some(inner_rc) = weak.upgrade() {
-                            let ws = Workspace { inner: inner_rc };
-                            let arena = ws.inner.borrow().arena.clone();
-                            let sidebar = ws.inner.borrow().sidebar.clone();
-                            // For sidebar→arena with room: show phantom
-                            // (We can't easily get source_id here without
-                            // reading the drag payload, so we show the phantom
-                            // optimistically and hide it if the source is
-                            // already in the arena.)
+                            let arena = inner_rc.borrow().arena.clone();
                             if !arena.is_full() {
-                                arena.show_phantom();
+                                // Defer rebuild to avoid removing mapped widgets
+                                // during the DropTarget event handler.
+                                glib::idle_add_local_once(move || {
+                                    arena.show_phantom();
+                                });
                             }
-                            _ = sidebar; // placeholder in sidebar handled separately
                         }
                         gtk::gdk::DragAction::MOVE
                     });
@@ -104,7 +100,9 @@ impl Workspace {
                     dt.connect_leave(move |_dt| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let ws = Workspace { inner: inner_rc };
-                            ws.clear_all_previews();
+                            glib::idle_add_local_once(move || {
+                                ws.clear_all_previews();
+                            });
                         }
                     });
                 }
@@ -116,8 +114,6 @@ impl Workspace {
                         };
                         if let Some(inner_rc) = weak.upgrade() {
                             let ws = Workspace { inner: inner_rc };
-                            // A drop on the arena background (not on a tile):
-                            // promote if source is in sidebar.
                             if ws.inner.borrow().sidebar.contains(source_id) {
                                 ws.clear_all_previews();
                                 ws.promote(source_id);
@@ -156,16 +152,12 @@ impl Workspace {
                 {
                     let weak = weak.clone();
                     dt.connect_enter(move |_dt, _x, y| {
+                        let y = y;
                         if let Some(inner_rc) = weak.upgrade() {
-                            let ws = Workspace { inner: inner_rc };
-                            let arena = ws.inner.borrow().arena.clone();
-                            let sidebar = ws.inner.borrow().sidebar.clone();
-                            // Show placeholder in sidebar + preview arena shrink.
-                            sidebar.show_placeholder(y);
-                            // We don't know the source id here, but arena
-                            // preview_remove is handled by DragHoverEnter on
-                            // the specific card target.
-                            _ = arena;
+                            let sidebar = inner_rc.borrow().sidebar.clone();
+                            glib::idle_add_local_once(move || {
+                                sidebar.show_placeholder(y);
+                            });
                         }
                         gtk::gdk::DragAction::MOVE
                     });
@@ -174,8 +166,7 @@ impl Workspace {
                     let weak = weak.clone();
                     dt.connect_motion(move |_dt, _x, y| {
                         if let Some(inner_rc) = weak.upgrade() {
-                            let ws = Workspace { inner: inner_rc };
-                            let sidebar = ws.inner.borrow().sidebar.clone();
+                            let sidebar = inner_rc.borrow().sidebar.clone();
                             sidebar.move_placeholder(y);
                         }
                         gtk::gdk::DragAction::MOVE
@@ -186,7 +177,9 @@ impl Workspace {
                     dt.connect_leave(move |_dt| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let ws = Workspace { inner: inner_rc };
-                            ws.clear_all_previews();
+                            glib::idle_add_local_once(move || {
+                                ws.clear_all_previews();
+                            });
                         }
                     });
                 }
@@ -635,6 +628,8 @@ impl Workspace {
     }
 
     /// Handle drag hover entering a session's drop zone.
+    /// Deferred to idle to avoid restructuring the widget tree during
+    /// DropTarget event handlers (which causes GTK unrealize assertions).
     fn handle_drag_hover_enter(&self, source_id: u32, target_id: u32) {
         let (arena, sidebar) = {
             let inner = self.inner.borrow();
@@ -649,17 +644,23 @@ impl Workspace {
         match (source_in_arena, target_in_arena, source_in_sidebar, target_in_sidebar) {
             // Arena → arena: preview the swap.
             (true, true, _, _) => {
-                arena.preview_swap(source_id, target_id);
+                glib::idle_add_local_once(move || {
+                    arena.preview_swap(source_id, target_id);
+                });
             }
             // Sidebar → arena (has room): show phantom in n+1 layout.
             (_, true, true, _) if !arena.is_full() => {
-                arena.show_phantom();
+                glib::idle_add_local_once(move || {
+                    arena.show_phantom();
+                });
             }
             // Sidebar → arena (full): drop-hover on tile is enough (handled by CSS).
             (_, true, true, _) => {}
-            // Arena → sidebar card: preview arena without the source, show sidebar placeholder.
+            // Arena → sidebar card: preview arena without the source.
             (true, _, _, true) => {
-                arena.preview_remove(source_id);
+                glib::idle_add_local_once(move || {
+                    arena.preview_remove(source_id);
+                });
             }
             _ => {}
         }
@@ -667,9 +668,12 @@ impl Workspace {
 
     /// Handle drag hover leaving a session's drop zone.
     fn handle_drag_hover_leave(&self, _source_id: u32, _target_id: u32) {
-        // Restore all previews to normal state. When the drag enters a
-        // new target, handle_drag_hover_enter will set up a new preview.
-        self.clear_all_previews();
+        let weak = Rc::downgrade(&self.inner);
+        glib::idle_add_local_once(move || {
+            if let Some(inner_rc) = weak.upgrade() {
+                Workspace { inner: inner_rc }.clear_all_previews();
+            }
+        });
     }
 
     /// Reset all drag-related visual previews to their normal state.
