@@ -155,8 +155,12 @@
     transition: background 200ms ease;
 }
 
-/* Elevated privilege (root): tinted header matching GNOME Console. */
-.orbit-tile-header.elevated {
+/* Elevated privilege (root): tinted header matching GNOME Console.
+   High-specificity selectors ensure the red tint wins over focused
+   and dragging overrides. */
+.orbit-tile-header.elevated,
+.orbit-tile.focused .orbit-tile-header.elevated,
+.orbit-workspace.dragging .orbit-tile.focused .orbit-tile-header.elevated {
     background: @error_bg_color;
     border-bottom-color: alpha(@error_color, 0.4);
 }
