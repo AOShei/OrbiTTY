@@ -40,6 +40,12 @@ pub enum SessionEvent {
     RequestSwap(u32),
     Focused,
     Bell,
+    DragStarted,
+    DragEnded,
+    /// A drag carrying `source_id` entered this session's drop zone.
+    DragHoverEnter(u32),
+    /// A drag left this session's drop zone.
+    DragHoverLeave(u32),
 }
 
 pub struct SessionInner {
@@ -141,11 +147,24 @@ impl Session {
 
         // Drag source on the tile header for arena reordering.
         {
+            let cb = cb.clone();
             let drag_source = gtk::DragSource::new();
             drag_source.set_actions(gtk::gdk::DragAction::MOVE);
             drag_source.connect_prepare(move |_src, _x, _y| {
                 Some(gtk::gdk::ContentProvider::for_value(&id.to_value()))
             });
+            {
+                let cb = cb.clone();
+                drag_source.connect_drag_begin(move |_src, _drag| {
+                    (cb.borrow())(id, SessionEvent::DragStarted);
+                });
+            }
+            {
+                let cb = cb.clone();
+                drag_source.connect_drag_end(move |_src, _drag, _delete| {
+                    (cb.borrow())(id, SessionEvent::DragEnded);
+                });
+            }
             tile_header.add_controller(drag_source);
         }
 
@@ -184,6 +203,29 @@ impl Session {
         card_header.append(&card_title);
         card_header.append(&promote_btn);
         card_header.append(&card_close_btn);
+
+        // Drag source on the card header so cards can be dragged into the arena.
+        {
+            let cb = cb.clone();
+            let drag_source = gtk::DragSource::new();
+            drag_source.set_actions(gtk::gdk::DragAction::MOVE);
+            drag_source.connect_prepare(move |_src, _x, _y| {
+                Some(gtk::gdk::ContentProvider::for_value(&id.to_value()))
+            });
+            {
+                let cb = cb.clone();
+                drag_source.connect_drag_begin(move |_src, _drag| {
+                    (cb.borrow())(id, SessionEvent::DragStarted);
+                });
+            }
+            {
+                let cb = cb.clone();
+                drag_source.connect_drag_end(move |_src, _drag, _delete| {
+                    (cb.borrow())(id, SessionEvent::DragEnded);
+                });
+            }
+            card_header.add_controller(drag_source);
+        }
 
         let card_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
         card_slot.set_hexpand(true);
@@ -276,10 +318,36 @@ impl Session {
         // Drop target on tile for arena swap.
         {
             let cb = cb.clone();
+            let tile_frame = session.inner.borrow().tile_frame.clone();
             let drop_target = gtk::DropTarget::new(
                 <u32 as glib::types::StaticType>::static_type(),
                 gtk::gdk::DragAction::MOVE,
             );
+            {
+                let cb = cb.clone();
+                let tile_frame = tile_frame.clone();
+                drop_target.connect_enter(move |dt, _x, _y| {
+                    tile_frame.add_css_class("drop-hover");
+                    if let Some(source_id) = extract_source_id(dt) {
+                        if source_id != id {
+                            (cb.borrow())(id, SessionEvent::DragHoverEnter(source_id));
+                        }
+                    }
+                    gtk::gdk::DragAction::MOVE
+                });
+            }
+            {
+                let cb = cb.clone();
+                let tile_frame = tile_frame.clone();
+                drop_target.connect_leave(move |dt| {
+                    tile_frame.remove_css_class("drop-hover");
+                    if let Some(source_id) = extract_source_id(dt) {
+                        if source_id != id {
+                            (cb.borrow())(id, SessionEvent::DragHoverLeave(source_id));
+                        }
+                    }
+                });
+            }
             drop_target.connect_drop(move |_target, value, _x, _y| {
                 if let Ok(source_id) = value.get::<u32>() {
                     if source_id != id {
@@ -290,6 +358,50 @@ impl Session {
                 false
             });
             session.inner.borrow().tile_frame.add_controller(drop_target);
+        }
+        // Drop target on the sidebar card for cross-region swap.
+        {
+            let cb = cb.clone();
+            let card_frame = session.inner.borrow().card_frame.clone();
+            let drop_target = gtk::DropTarget::new(
+                <u32 as glib::types::StaticType>::static_type(),
+                gtk::gdk::DragAction::MOVE,
+            );
+            {
+                let cb = cb.clone();
+                let card_frame = card_frame.clone();
+                drop_target.connect_enter(move |dt, _x, _y| {
+                    card_frame.add_css_class("drop-hover");
+                    if let Some(source_id) = extract_source_id(dt) {
+                        if source_id != id {
+                            (cb.borrow())(id, SessionEvent::DragHoverEnter(source_id));
+                        }
+                    }
+                    gtk::gdk::DragAction::MOVE
+                });
+            }
+            {
+                let cb = cb.clone();
+                let card_frame = card_frame.clone();
+                drop_target.connect_leave(move |dt| {
+                    card_frame.remove_css_class("drop-hover");
+                    if let Some(source_id) = extract_source_id(dt) {
+                        if source_id != id {
+                            (cb.borrow())(id, SessionEvent::DragHoverLeave(source_id));
+                        }
+                    }
+                });
+            }
+            drop_target.connect_drop(move |_target, value, _x, _y| {
+                if let Ok(source_id) = value.get::<u32>() {
+                    if source_id != id {
+                        (cb.borrow())(id, SessionEvent::RequestSwap(source_id));
+                    }
+                    return true;
+                }
+                false
+            });
+            session.inner.borrow().card_frame.add_controller(drop_target);
         }
         // Spawn default shell. cwd defaults to $HOME when not supplied.
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
@@ -501,6 +613,14 @@ fn is_shell_idle(pid: i32) -> bool {
     } else {
         true
     }
+}
+
+/// Extract the source session id from a DropTarget's current drag.
+fn extract_source_id(dt: &gtk::DropTarget) -> Option<u32> {
+    let drop = dt.current_drop()?;
+    let drag = drop.drag()?;
+    let content = drag.content();
+    content.value(<u32 as glib::types::StaticType>::static_type()).ok()?.get::<u32>().ok()
 }
 
 fn make_pip() -> gtk::Box {

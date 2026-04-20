@@ -12,7 +12,7 @@
     border: 1px solid alpha(@borders, 0.6);
     padding: 6px;
     margin: 2px 0;
-    transition: border-color 150ms ease, background 150ms ease;
+    transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
 }
 
 .orbit-preview-card:hover {
@@ -66,12 +66,50 @@
     padding: 0;
     margin: 3px;
     border: 1px solid alpha(@borders, 0.4);
-    transition: border-color 120ms ease;
+    transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
 }
 
 .orbit-tile.focused {
     border-color: @accent_color;
     box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.4);
+}
+
+/* Suppress focus / active highlights during a drag so the drag target
+   (drop-hover) is the only thing drawing the eye. */
+.orbit-workspace.dragging .orbit-tile.focused {
+    border-color: alpha(@borders, 0.4);
+    box-shadow: none;
+}
+
+.orbit-workspace.dragging .orbit-preview-card.active {
+    border-color: alpha(@borders, 0.6);
+}
+
+.orbit-tile.drop-hover {
+    border-color: @accent_color;
+    box-shadow: inset 0 0 0 2px @accent_color;
+    background: alpha(@accent_bg_color, 0.18);
+}
+
+.orbit-preview-card.drop-hover {
+    border-color: @accent_color;
+    background: alpha(@accent_bg_color, 0.25);
+    box-shadow: inset 0 0 0 2px @accent_color;
+}
+
+.orbit-drop-placeholder {
+    background: alpha(@accent_color, 0.08);
+    border: 2px dashed alpha(@accent_color, 0.6);
+    border-radius: 8px;
+    margin: 3px;
+    transition: opacity 150ms ease, background 150ms ease;
+    color: alpha(@window_fg_color, 0.5);
+}
+
+/* Sidebar-specific placeholder: shorter height, subtle. */
+.orbit-sidebar-placeholder {
+    min-height: 50px;
+    margin: 4px 0;
 }
 
 .orbit-tile-header {

@@ -43,6 +43,7 @@ impl Workspace {
         root.set_end_child(Some(&sidebar.widget()));
         root.set_hexpand(true);
         root.set_vexpand(true);
+        root.add_css_class("orbit-workspace");
 
         let inner = Rc::new(RefCell::new(WorkspaceInner {
             id,
@@ -57,6 +58,155 @@ impl Workspace {
         }));
 
         let workspace = Workspace { inner };
+
+        // Background drop targets:
+        //   - Arena grid: catch drops/hovers not on a specific tile.
+        //   - Arena empty-state: drop here promotes the dragged session.
+        //   - Sidebar list: drop on blank space demotes; hover shows placeholder.
+        {
+            let (arena_grid, empty_state, list) = {
+                let inner = workspace.inner.borrow();
+                (
+                    inner.arena.widget(),
+                    inner.arena.empty_state_widget(),
+                    inner.sidebar.list_widget(),
+                )
+            };
+            // Arena grid: hover shows phantom when sidebar card is dragged over.
+            {
+                let weak: Weak<RefCell<WorkspaceInner>> = Rc::downgrade(&workspace.inner);
+                let dt = gtk::DropTarget::new(
+                    <u32 as glib::types::StaticType>::static_type(),
+                    gtk::gdk::DragAction::MOVE,
+                );
+                {
+                    let weak = weak.clone();
+                    dt.connect_enter(move |_dt, _x, _y| {
+                        if let Some(inner_rc) = weak.upgrade() {
+                            let ws = Workspace { inner: inner_rc };
+                            let arena = ws.inner.borrow().arena.clone();
+                            let sidebar = ws.inner.borrow().sidebar.clone();
+                            // For sidebar→arena with room: show phantom
+                            // (We can't easily get source_id here without
+                            // reading the drag payload, so we show the phantom
+                            // optimistically and hide it if the source is
+                            // already in the arena.)
+                            if !arena.is_full() {
+                                arena.show_phantom();
+                            }
+                            _ = sidebar; // placeholder in sidebar handled separately
+                        }
+                        gtk::gdk::DragAction::MOVE
+                    });
+                }
+                {
+                    let weak = weak.clone();
+                    dt.connect_leave(move |_dt| {
+                        if let Some(inner_rc) = weak.upgrade() {
+                            let ws = Workspace { inner: inner_rc };
+                            ws.clear_all_previews();
+                        }
+                    });
+                }
+                {
+                    let weak = weak.clone();
+                    dt.connect_drop(move |_t, value, _x, _y| {
+                        let Ok(source_id) = value.get::<u32>() else {
+                            return false;
+                        };
+                        if let Some(inner_rc) = weak.upgrade() {
+                            let ws = Workspace { inner: inner_rc };
+                            // A drop on the arena background (not on a tile):
+                            // promote if source is in sidebar.
+                            if ws.inner.borrow().sidebar.contains(source_id) {
+                                ws.clear_all_previews();
+                                ws.promote(source_id);
+                            }
+                        }
+                        true
+                    });
+                }
+                arena_grid.add_controller(dt);
+            }
+            // Arena empty-state: drop promotes.
+            {
+                let weak: Weak<RefCell<WorkspaceInner>> = Rc::downgrade(&workspace.inner);
+                let dt = gtk::DropTarget::new(
+                    <u32 as glib::types::StaticType>::static_type(),
+                    gtk::gdk::DragAction::MOVE,
+                );
+                dt.connect_drop(move |_t, value, _x, _y| {
+                    let Ok(source_id) = value.get::<u32>() else { return false };
+                    if let Some(inner_rc) = weak.upgrade() {
+                        let ws = Workspace { inner: inner_rc };
+                        ws.clear_all_previews();
+                        ws.promote(source_id);
+                    }
+                    true
+                });
+                empty_state.add_controller(dt);
+            }
+            // Sidebar list: hover shows placeholder, drop demotes.
+            {
+                let weak: Weak<RefCell<WorkspaceInner>> = Rc::downgrade(&workspace.inner);
+                let dt = gtk::DropTarget::new(
+                    <u32 as glib::types::StaticType>::static_type(),
+                    gtk::gdk::DragAction::MOVE,
+                );
+                {
+                    let weak = weak.clone();
+                    dt.connect_enter(move |_dt, _x, y| {
+                        if let Some(inner_rc) = weak.upgrade() {
+                            let ws = Workspace { inner: inner_rc };
+                            let arena = ws.inner.borrow().arena.clone();
+                            let sidebar = ws.inner.borrow().sidebar.clone();
+                            // Show placeholder in sidebar + preview arena shrink.
+                            sidebar.show_placeholder(y);
+                            // We don't know the source id here, but arena
+                            // preview_remove is handled by DragHoverEnter on
+                            // the specific card target.
+                            _ = arena;
+                        }
+                        gtk::gdk::DragAction::MOVE
+                    });
+                }
+                {
+                    let weak = weak.clone();
+                    dt.connect_motion(move |_dt, _x, y| {
+                        if let Some(inner_rc) = weak.upgrade() {
+                            let ws = Workspace { inner: inner_rc };
+                            let sidebar = ws.inner.borrow().sidebar.clone();
+                            sidebar.move_placeholder(y);
+                        }
+                        gtk::gdk::DragAction::MOVE
+                    });
+                }
+                {
+                    let weak = weak.clone();
+                    dt.connect_leave(move |_dt| {
+                        if let Some(inner_rc) = weak.upgrade() {
+                            let ws = Workspace { inner: inner_rc };
+                            ws.clear_all_previews();
+                        }
+                    });
+                }
+                {
+                    let weak = weak.clone();
+                    dt.connect_drop(move |_t, value, _x, _y| {
+                        let Ok(source_id) = value.get::<u32>() else { return false };
+                        if let Some(inner_rc) = weak.upgrade() {
+                            let ws = Workspace { inner: inner_rc };
+                            ws.clear_all_previews();
+                            if ws.inner.borrow().arena.contains(source_id) {
+                                ws.demote(source_id);
+                            }
+                        }
+                        true
+                    });
+                }
+                list.add_controller(dt);
+            }
+        }
 
         // Build sessions from the template.
         for spec in &template.sessions {
@@ -121,15 +271,31 @@ impl Workspace {
                 SessionEvent::RequestDemote => ws.demote(id),
                 SessionEvent::RequestClose => ws.close_session(id),
                 SessionEvent::RequestClone => ws.clone_session(id),
-                SessionEvent::RequestSwap(source_id) => {
-                    let arena = ws.inner.borrow().arena.clone();
-                    arena.swap_sessions(source_id, id);
-                }
+                SessionEvent::RequestSwap(source_id) => ws.handle_drop(source_id, id),
                 SessionEvent::Focused => ws.focus_session(id),
                 SessionEvent::Bell => {
                     if let Some(s) = ws.find(id) {
                         s.raise_alert();
                     }
+                }
+                SessionEvent::DragStarted => {
+                    ws.inner.borrow().root.add_css_class("dragging");
+                }
+                SessionEvent::DragEnded => {
+                    ws.inner.borrow().root.remove_css_class("dragging");
+                    // Clean up any lingering drop-hover classes.
+                    let sessions: Vec<Session> = ws.inner.borrow().registry.clone();
+                    for s in &sessions {
+                        s.tile_frame().remove_css_class("drop-hover");
+                        s.card_frame().remove_css_class("drop-hover");
+                    }
+                    ws.clear_all_previews();
+                }
+                SessionEvent::DragHoverEnter(source_id) => {
+                    ws.handle_drag_hover_enter(source_id, id);
+                }
+                SessionEvent::DragHoverLeave(source_id) => {
+                    ws.handle_drag_hover_leave(source_id, id);
                 }
             }
         })))
@@ -186,6 +352,79 @@ impl Workspace {
             incoming.place_in_arena();
         }
         self.focus_session(incoming.id());
+    }
+
+    /// Dispatch a drag-and-drop landing on a session target (`target_id`) from
+    /// a dragged session (`source_id`). Branches on the region each id lives in
+    /// and whether the arena has room; see the verification table in the plan.
+    pub fn handle_drop(&self, source_id: u32, target_id: u32) {
+        if source_id == target_id {
+            return;
+        }
+        // Clear visual previews before executing the drop.
+        self.clear_all_previews();
+        let (arena, sidebar) = {
+            let inner = self.inner.borrow();
+            (inner.arena.clone(), inner.sidebar.clone())
+        };
+
+        let source_in_arena = arena.contains(source_id);
+        let source_in_sidebar = sidebar.contains(source_id);
+        let target_in_arena = arena.contains(target_id);
+        let target_in_sidebar = sidebar.contains(target_id);
+
+        match (source_in_arena, target_in_arena, source_in_sidebar, target_in_sidebar) {
+            // Arena → arena reorder (existing behavior).
+            (true, true, _, _) => arena.swap_sessions(source_id, target_id),
+
+            // Sidebar → arena.
+            (_, true, true, _) => {
+                if !arena.is_full() {
+                    // Room available: join the arena, tiles reshape via rebuild.
+                    self.promote(source_id);
+                } else {
+                    // Arena full: cross-region swap at the target tile's slot.
+                    let Some(dragged) = sidebar.remove(source_id) else { return };
+                    let Some(evicted) = arena.swap_at(target_id, dragged.clone()) else {
+                        // Should be unreachable given target_in_arena; re-add dragged defensively.
+                        sidebar.add(dragged);
+                        return;
+                    };
+                    evicted.place_in_sidebar();
+                    sidebar.add(evicted);
+                    dragged.place_in_arena();
+                    let promoted_id = dragged.id();
+                    let weak = Rc::downgrade(&self.inner);
+                    glib::idle_add_local_once(move || {
+                        if let Some(inner_rc) = weak.upgrade() {
+                            Workspace { inner: inner_rc }.focus_session(promoted_id);
+                        }
+                    });
+                }
+            }
+
+            // Arena → sidebar (drop on a specific card): cross-region swap.
+            (true, _, _, true) => {
+                let Some(target) = sidebar.remove(target_id) else { return };
+                let Some(evicted) = arena.swap_at(source_id, target.clone()) else {
+                    sidebar.add(target);
+                    return;
+                };
+                evicted.place_in_sidebar();
+                sidebar.add(evicted);
+                target.place_in_arena();
+                let promoted_id = target.id();
+                let weak = Rc::downgrade(&self.inner);
+                glib::idle_add_local_once(move || {
+                    if let Some(inner_rc) = weak.upgrade() {
+                        Workspace { inner: inner_rc }.focus_session(promoted_id);
+                    }
+                });
+            }
+
+            // Sidebar → sidebar, or unknown ids: no-op.
+            _ => {}
+        }
     }
 
     pub fn demote(&self, id: u32) {
@@ -393,6 +632,52 @@ impl Workspace {
 
     pub fn sessions(&self) -> Vec<Session> {
         self.inner.borrow().registry.clone()
+    }
+
+    /// Handle drag hover entering a session's drop zone.
+    fn handle_drag_hover_enter(&self, source_id: u32, target_id: u32) {
+        let (arena, sidebar) = {
+            let inner = self.inner.borrow();
+            (inner.arena.clone(), inner.sidebar.clone())
+        };
+
+        let source_in_arena = arena.contains(source_id);
+        let source_in_sidebar = sidebar.contains(source_id);
+        let target_in_arena = arena.contains(target_id);
+        let target_in_sidebar = sidebar.contains(target_id);
+
+        match (source_in_arena, target_in_arena, source_in_sidebar, target_in_sidebar) {
+            // Arena → arena: preview the swap.
+            (true, true, _, _) => {
+                arena.preview_swap(source_id, target_id);
+            }
+            // Sidebar → arena (has room): show phantom in n+1 layout.
+            (_, true, true, _) if !arena.is_full() => {
+                arena.show_phantom();
+            }
+            // Sidebar → arena (full): drop-hover on tile is enough (handled by CSS).
+            (_, true, true, _) => {}
+            // Arena → sidebar card: preview arena without the source, show sidebar placeholder.
+            (true, _, _, true) => {
+                arena.preview_remove(source_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle drag hover leaving a session's drop zone.
+    fn handle_drag_hover_leave(&self, _source_id: u32, _target_id: u32) {
+        // Restore all previews to normal state. When the drag enters a
+        // new target, handle_drag_hover_enter will set up a new preview.
+        self.clear_all_previews();
+    }
+
+    /// Reset all drag-related visual previews to their normal state.
+    fn clear_all_previews(&self) {
+        let inner = self.inner.borrow();
+        inner.arena.hide_phantom();
+        inner.arena.restore_preview();
+        inner.sidebar.hide_placeholder();
     }
 }
 
