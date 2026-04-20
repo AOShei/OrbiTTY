@@ -499,6 +499,11 @@ impl Workspace {
     /// and whether the arena has room; see the verification table in the plan.
     pub fn handle_drop(&self, source_id: u32, target_id: u32) {
         if source_id == target_id {
+            // Self-drop: commit any active preview swap, then return.
+            let arena = self.inner.borrow().arena.clone();
+            if arena.has_preview_swap() {
+                arena.commit_preview_swap();
+            }
             return;
         }
         // Clear visual previews before executing the drop.
