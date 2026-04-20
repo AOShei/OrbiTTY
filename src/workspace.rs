@@ -673,7 +673,8 @@ impl Workspace {
     pub fn new_session(&self) {
         let name = format!("Shell {}", self.inner.borrow().next_session_id);
         let home = std::env::var("HOME").ok();
-        self.spawn_session(&name, home.as_deref(), true);
+        let session = self.spawn_session(&name, home.as_deref(), true);
+        session.grab_focus();
     }
 
     /// Spawn a new session with its cwd copied from an existing one.
@@ -682,7 +683,8 @@ impl Workspace {
         let fallback = std::env::var("HOME").ok();
         let dir = cwd.as_deref().or(fallback.as_deref());
         let name = format!("Shell {}", self.inner.borrow().next_session_id);
-        self.spawn_session(&name, dir, true);
+        let session = self.spawn_session(&name, dir, true);
+        session.grab_focus();
     }
 
     /// Tear down a session: remove from arena/sidebar and drop from registry.
