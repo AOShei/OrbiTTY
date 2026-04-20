@@ -400,17 +400,40 @@ impl OrbitWindow {
             });
             group.add_action(&a);
         }
+        // Ctrl+Shift+D: demote the currently focused arena session to the sidebar.
         {
             let weak = Rc::downgrade(self);
-            let a = gio::SimpleAction::new("toggle-session", Some(&i32::static_variant_type()));
-            a.connect_activate(move |_, param| {
+            let a = gio::SimpleAction::new("demote-focused", None);
+            a.connect_activate(move |_, _| {
                 if let Some(this) = weak.upgrade() {
-                    if let Some(v) = param {
-                        if let Some(i) = v.get::<i32>() {
-                            if let Some(ws) = this.current_workspace() {
-                                ws.toggle_index(i as usize);
-                            }
-                        }
+                    if let Some(ws) = this.current_workspace() {
+                        ws.demote_focused();
+                    }
+                }
+            });
+            group.add_action(&a);
+        }
+
+        // Ctrl+Tab / Ctrl+Shift+Tab: cycle focus through arena sessions
+        {
+            let weak = Rc::downgrade(self);
+            let a = gio::SimpleAction::new("cycle-session-next", None);
+            a.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade() {
+                    if let Some(ws) = this.current_workspace() {
+                        ws.focus_next();
+                    }
+                }
+            });
+            group.add_action(&a);
+        }
+        {
+            let weak = Rc::downgrade(self);
+            let a = gio::SimpleAction::new("cycle-session-prev", None);
+            a.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade() {
+                    if let Some(ws) = this.current_workspace() {
+                        ws.focus_prev();
                     }
                 }
             });

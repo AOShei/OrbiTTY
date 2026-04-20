@@ -189,25 +189,61 @@ impl Workspace {
     }
 
     pub fn demote(&self, id: u32) {
-        let inner = self.inner.borrow();
-        let arena = inner.arena.clone();
-        let sidebar = inner.sidebar.clone();
-        drop(inner);
+        // Capture the arena position before removal so focus can shift to
+        // the previous arena neighbour after the demote.
+        let arena_idx = {
+            let inner = self.inner.borrow();
+            inner.arena.session_ids().iter().position(|x| *x == id)
+        };
 
-        if let Some(s) = arena.remove(id) {
-            sidebar.add(s.clone());
-            s.place_in_sidebar();
+        let (arena, sidebar) = {
+            let inner = self.inner.borrow();
+            (inner.arena.clone(), inner.sidebar.clone())
+        };
+
+        let Some(s) = arena.remove(id) else {
+            return;
+        };
+        sidebar.add(s.clone());
+        s.place_in_sidebar();
+
+        // Defer the focus shift: reparenting the VTE triggers GTK focus
+        // bookkeeping that runs after this function returns, and would
+        // override an immediate focus_session() call.
+        if let Some(i) = arena_idx {
+            let new_idx = i.saturating_sub(1);
+            let weak = Rc::downgrade(&self.inner);
+            glib::idle_add_local_once(move || {
+                let Some(inner_rc) = weak.upgrade() else {
+                    return;
+                };
+                let ws = Workspace { inner: inner_rc };
+                let next = ws
+                    .inner
+                    .borrow()
+                    .arena
+                    .session_by_index(new_idx)
+                    .map(|s| s.id());
+                match next {
+                    Some(nid) => ws.focus_session(nid),
+                    None => {
+                        ws.inner.borrow_mut().last_focused_id = None;
+                        let sessions: Vec<Session> = ws.inner.borrow().registry.clone();
+                        for s in &sessions {
+                            s.set_focused(false);
+                        }
+                    }
+                }
+            });
         }
     }
 
-    pub fn toggle(&self, id: u32) {
-        let inner = self.inner.borrow();
-        let in_arena = inner.arena.contains(id);
-        drop(inner);
-        if in_arena {
+    /// Demote the currently focused arena session to the sidebar. No-op if
+    /// focus is in the sidebar or no session is focused in the arena.
+    pub fn demote_focused(&self) {
+        let id = self.inner.borrow().arena.focused().map(|s| s.id());
+        if let Some(id) = id {
             self.demote(id);
-        } else {
-            self.promote(id);
         }
     }
 
@@ -238,6 +274,39 @@ impl Workspace {
         self.focus_index(1);
     }
 
+    /// Focus the next arena session in display order, wrapping around.
+    pub fn focus_next(&self) {
+        let (ids, current) = {
+            let inner = self.inner.borrow();
+            (inner.arena.session_ids(), inner.arena.focused().map(|s| s.id()))
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let next = match current.and_then(|id| ids.iter().position(|x| *x == id)) {
+            Some(i) => ids[(i + 1) % ids.len()],
+            None => ids[0],
+        };
+        self.focus_session(next);
+    }
+
+    /// Focus the previous arena session in display order, wrapping around.
+    pub fn focus_prev(&self) {
+        let (ids, current) = {
+            let inner = self.inner.borrow();
+            (inner.arena.session_ids(), inner.arena.focused().map(|s| s.id()))
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let len = ids.len();
+        let prev = match current.and_then(|id| ids.iter().position(|x| *x == id)) {
+            Some(i) => ids[(i + len - 1) % len],
+            None => ids[len - 1],
+        };
+        self.focus_session(prev);
+    }
+
     /// Focus the arena session at a 1-based index.
     pub fn focus_index(&self, idx_1based: usize) {
         let inner = self.inner.borrow();
@@ -248,29 +317,6 @@ impl Workspace {
             let id = s.id();
             drop(inner);
             self.focus_session(id);
-        }
-    }
-
-    /// Toggle the arena session at a 1-based index between arena and sidebar.
-    pub fn toggle_index(&self, idx_1based: usize) {
-        let inner = self.inner.borrow();
-        if idx_1based == 0 {
-            return;
-        }
-        if let Some(s) = inner.arena.session_by_index(idx_1based - 1) {
-            let id = s.id();
-            drop(inner);
-            self.toggle(id);
-        } else {
-            let inner = self.inner.borrow();
-            let sidebar_ids = inner.sidebar.session_ids();
-            if let Some(id) = sidebar_ids
-                .get(idx_1based - 1 - inner.arena.count())
-                .copied()
-            {
-                drop(inner);
-                self.promote(id);
-            }
         }
     }
 
@@ -295,16 +341,54 @@ impl Workspace {
 
     /// Tear down a session: remove from arena/sidebar and drop from registry.
     pub fn close_session(&self, id: u32) {
+        // Capture the arena position (if any) before removing, so we can
+        // focus the neighbour immediately to the left.
+        let arena_idx = {
+            let inner = self.inner.borrow();
+            if inner.arena.contains(id) {
+                inner.arena.session_ids().iter().position(|x| *x == id)
+            } else {
+                None
+            }
+        };
+
         let (arena, sidebar) = {
             let inner = self.inner.borrow();
             (inner.arena.clone(), inner.sidebar.clone())
         };
-        if arena.contains(id) {
+        if arena_idx.is_some() {
             arena.remove(id);
         } else {
             sidebar.remove(id);
         }
         self.inner.borrow_mut().registry.retain(|s| s.id() != id);
+
+        if let Some(i) = arena_idx {
+            // Closed an arena session: focus the previous arena position. If
+            // the closed one was the first, focus whatever is now at index 0
+            // (i.e. what used to be at index 1). Drop focus if arena is empty.
+            let new_idx = i.saturating_sub(1);
+            let next = self
+                .inner
+                .borrow()
+                .arena
+                .session_by_index(new_idx)
+                .map(|s| s.id());
+            match next {
+                Some(nid) => self.focus_session(nid),
+                None => {
+                    self.inner.borrow_mut().last_focused_id = None;
+                    let sessions: Vec<Session> = self.inner.borrow().registry.clone();
+                    for s in &sessions {
+                        s.set_focused(false);
+                    }
+                }
+            }
+        } else if self.inner.borrow().last_focused_id == Some(id) {
+            // Closed a sidebar session that happened to be last-focused; clear
+            // the stale id but leave current arena focus untouched.
+            self.inner.borrow_mut().last_focused_id = None;
+        }
     }
 
     pub fn sessions(&self) -> Vec<Session> {

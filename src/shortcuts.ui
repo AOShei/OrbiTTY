@@ -53,13 +53,25 @@
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Focus Session 1–9</property>
-                <property name="accelerator">&lt;Super&gt;1...&lt;Super&gt;9</property>
+                <property name="accelerator">&lt;Alt&gt;1...&lt;Alt&gt;9</property>
               </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
-                <property name="title" translatable="yes">Promote / Demote Session</property>
-                <property name="accelerator">&lt;Super&gt;&lt;Shift&gt;1...&lt;Super&gt;&lt;Shift&gt;9</property>
+                <property name="title" translatable="yes">Send Focused Session to Monitor Dock</property>
+                <property name="accelerator">&lt;Primary&gt;&lt;Shift&gt;d</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Cycle to Next Session</property>
+                <property name="accelerator">&lt;Primary&gt;Tab</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Cycle to Previous Session</property>
+                <property name="accelerator">&lt;Primary&gt;&lt;Shift&gt;Tab</property>
               </object>
             </child>
           </object>

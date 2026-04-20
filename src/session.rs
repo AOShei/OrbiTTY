@@ -266,6 +266,13 @@ impl Session {
                 (cb.borrow())(id, SessionEvent::Bell);
             });
         }
+        {
+            // Shell exit (e.g. user typed `exit`) → close the session.
+            let cb = cb.clone();
+            vte.connect_child_exited(move |_, _status| {
+                (cb.borrow())(id, SessionEvent::RequestClose);
+            });
+        }
         // Drop target on tile for arena swap.
         {
             let cb = cb.clone();

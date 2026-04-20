@@ -121,13 +121,15 @@ fn register_actions(app: &adw::Application) {
     for i in 1..=9 {
         app.set_accels_for_action(
             &format!("win.focus-session({i})"),
-            &[&format!("<Super>{i}")],
-        );
-        app.set_accels_for_action(
-            &format!("win.toggle-session({i})"),
-            &[&format!("<Super><Shift>{i}")],
+            &[&format!("<Alt>{i}")],
         );
     }
+    app.set_accels_for_action("win.demote-focused", &["<Primary><Shift>d"]);
+    app.set_accels_for_action("win.cycle-session-next", &["<Primary>Tab"]);
+    app.set_accels_for_action(
+        "win.cycle-session-prev",
+        &["<Primary><Shift>Tab", "<Primary><Shift>ISO_Left_Tab"],
+    );
 
     // App-scoped accelerators
     app.set_accels_for_action("app.new-window", &["<Primary><Shift>n"]);
