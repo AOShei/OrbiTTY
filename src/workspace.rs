@@ -102,8 +102,11 @@ impl Workspace {
                                 glib::idle_add_local_once(move || {
                                     if gen_rc.get() != gen { return; }
                                     guard.set(true);
-                                    arena.show_phantom_at(slot);
-                                    guard.set(false);
+                                    arena.ensure_phantom_at(slot);
+                                    // Defer guard unset so post-rebuild events are suppressed.
+                                    glib::idle_add_local_once(move || {
+                                        guard.set(false);
+                                    });
                                 });
                             }
                         }
@@ -119,14 +122,16 @@ impl Workspace {
                             let arena = inner_rc.borrow().arena.clone();
                             if !arena.is_full() {
                                 let slot = arena.slot_from_coords(x, y);
-                                if slot != arena.phantom_slot() {
+                                if slot != arena.phantom_slot() || !arena.has_phantom() {
                                     let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                                     let gen = gen_rc.get();
                                     glib::idle_add_local_once(move || {
                                         if gen_rc.get() != gen { return; }
                                         guard.set(true);
-                                        arena.move_phantom_to(slot);
-                                        guard.set(false);
+                                        arena.ensure_phantom_at(slot);
+                                        glib::idle_add_local_once(move || {
+                                            guard.set(false);
+                                        });
                                     });
                                 }
                             }
@@ -143,12 +148,17 @@ impl Workspace {
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             let gen = gen_rc.get();
                             let ws = Workspace { inner: inner_rc };
-                            glib::idle_add_local_once(move || {
-                                if gen_rc.get() != gen { return; }
-                                guard.set(true);
-                                ws.clear_all_previews();
-                                guard.set(false);
-                            });
+                            // Use a short timeout so that a subsequent enter (which
+                            // bumps gen) can cancel this clear before it executes.
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(50),
+                                move || {
+                                    if gen_rc.get() != gen { return; }
+                                    guard.set(true);
+                                    ws.clear_all_previews();
+                                    guard.set(false);
+                                },
+                            );
                         }
                     });
                 }
@@ -740,7 +750,7 @@ impl Workspace {
             (inner.arena.clone(), inner.sidebar.clone(), inner.suppressing_hover.clone())
         };
 
-        // Advance generation so any pending leave-clear idles become stale.
+        // Advance generation so any pending leave-clear timeouts become stale.
         let gen_rc = self.inner.borrow().drag_hover_gen.clone();
         gen_rc.set(gen_rc.get().wrapping_add(1));
         let gen = gen_rc.get();
@@ -755,7 +765,10 @@ impl Workspace {
                 if gen_rc.get() != gen { return; }
                 guard.set(true);
                 arena.ensure_phantom_at(slot);
-                guard.set(false);
+                // Defer guard unset so post-rebuild events are suppressed.
+                glib::idle_add_local_once(move || {
+                    guard.set(false);
+                });
             });
         }
     }
@@ -782,7 +795,9 @@ impl Workspace {
                 if gen_rc.get() != gen { return; }
                 guard.set(true);
                 arena.ensure_phantom_at(slot);
-                guard.set(false);
+                glib::idle_add_local_once(move || {
+                    guard.set(false);
+                });
             });
         }
     }
@@ -805,22 +820,11 @@ impl Workspace {
     }
 
     /// Handle drag hover leaving a session's drop zone.
+    /// Phantom cleanup is handled by the grid leave timeout and DragEnded;
+    /// per-tile leave only removes CSS classes (done in session.rs).
     fn handle_drag_hover_leave(&self, _source_id: u32, _target_id: u32) {
-        let weak = Rc::downgrade(&self.inner);
-        let gen_rc = self.inner.borrow().drag_hover_gen.clone();
-        let gen = gen_rc.get();
-        glib::idle_add_local_once(move || {
-            // Skip if a newer enter has already fired (generation advanced).
-            if gen_rc.get() != gen {
-                return;
-            }
-            if let Some(inner_rc) = weak.upgrade() {
-                let guard = inner_rc.borrow().suppressing_hover.clone();
-                guard.set(true);
-                Workspace { inner: inner_rc }.clear_all_previews();
-                guard.set(false);
-            }
-        });
+        // No-op: don't clear phantom here to avoid fighting with enter/motion
+        // handlers after rebuild shifts tile positions.
     }
 
     /// Reset all drag-related visual previews to their normal state.
