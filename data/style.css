@@ -152,6 +152,24 @@
     border-bottom: 1px solid alpha(@borders, 0.4);
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
+    transition: background 200ms ease;
+}
+
+/* Elevated privilege (root): tinted header matching GNOME Console. */
+.orbit-tile-header.elevated {
+    background: @error_bg_color;
+    border-bottom-color: alpha(@error_color, 0.4);
+}
+
+.orbit-card-header {
+    transition: background 200ms ease;
+}
+
+.orbit-card-header.elevated {
+    background: @error_bg_color;
+    border-radius: 8px 8px 0 0;
+    margin: -6px -6px 0 -6px;
+    padding: 6px;
 }
 
 .orbit-tile-title {

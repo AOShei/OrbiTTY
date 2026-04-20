@@ -57,6 +57,7 @@ pub struct SessionInner {
 
     // Arena tile (outer frame + header + content slot).
     pub tile_frame: gtk::Box,
+    pub tile_header: gtk::Box,
     pub tile_slot: gtk::Box,
     pub tile_title: gtk::Label,
     pub tile_pip: gtk::Box,
@@ -66,6 +67,7 @@ pub struct SessionInner {
 
     // Sidebar card.
     pub card_frame: gtk::Box,
+    pub card_header: gtk::Box,
     pub card_slot: gtk::Box,
     pub card_title: gtk::Label,
     pub card_pip: gtk::Box,
@@ -74,6 +76,7 @@ pub struct SessionInner {
 
     pub location: Location,
     pub pip_state: PipState,
+    pub elevated: bool,
     pub focused: bool,
     pub shell_pid: Option<i32>,
     pub poll_source: Option<glib::SourceId>,
@@ -184,6 +187,7 @@ impl Session {
         card_frame.set_vexpand(false);
 
         let card_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        card_header.add_css_class("orbit-card-header");
 
         let card_pip = make_pip();
         let card_title = gtk::Label::new(Some(name));
@@ -244,6 +248,7 @@ impl Session {
             name: name.to_string(),
             vte: vte.clone(),
             tile_frame,
+            tile_header,
             tile_slot,
             tile_title,
             tile_pip,
@@ -251,6 +256,7 @@ impl Session {
             tile_clone_btn: tile_clone_btn.clone(),
             tile_close_btn: tile_close_btn.clone(),
             card_frame,
+            card_header,
             card_slot,
             card_title,
             card_pip,
@@ -258,6 +264,7 @@ impl Session {
             card_close_btn: card_close_btn.clone(),
             location: Location::Sidebar, // will be placed by workspace
             pip_state: PipState::Idle,
+            elevated: false,
             focused: false,
             shell_pid: None,
             poll_source: None,
@@ -562,6 +569,21 @@ impl Session {
         inner.pip_state = state;
     }
 
+    fn set_elevated(&self, elevated: bool) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.elevated == elevated {
+            return;
+        }
+        inner.elevated = elevated;
+        if elevated {
+            inner.tile_header.add_css_class("elevated");
+            inner.card_header.add_css_class("elevated");
+        } else {
+            inner.tile_header.remove_css_class("elevated");
+            inner.card_header.remove_css_class("elevated");
+        }
+    }
+
     pub fn raise_alert(&self) {
         self.set_pip(PipState::Alert);
         self.inner.borrow_mut().alert_until =
@@ -587,11 +609,12 @@ impl Session {
             }
             let session = Session { inner: inner_rc };
             if let Some(pid) = pid {
-                if is_shell_idle(pid) {
+                if is_terminal_idle(pid) {
                     session.set_pip(PipState::Idle);
                 } else {
                     session.set_pip(PipState::Busy);
                 }
+                session.set_elevated(is_foreground_elevated(pid));
             }
             glib::ControlFlow::Continue
         });
@@ -619,28 +642,74 @@ impl Session {
     }
 }
 
-/// Check whether the shell is the foreground process of its terminal,
-/// i.e. waiting for user input rather than running a child command.
-fn is_shell_idle(pid: i32) -> bool {
-    let path = format!("/proc/{}/stat", pid);
-    let Ok(data) = std::fs::read_to_string(&path) else {
-        return true;
-    };
-    // /proc/[pid]/stat: pid (comm) state ppid pgrp session tty_nr tpgid ...
-    // comm may contain spaces/parens, so find the last ')'.
-    let Some(pos) = data.rfind(')') else {
-        return true;
-    };
+/// Parse pgrp and tpgid from /proc/[pid]/stat.
+fn parse_pgrp_tpgid(pid: i32) -> Option<(i32, i32)> {
+    let data = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let pos = data.rfind(')')?;
     let rest = &data[pos + 2..];
     let fields: Vec<&str> = rest.split_whitespace().collect();
-    // fields[2] = pgrp, fields[5] = tpgid (foreground process group of tty)
-    if fields.len() > 5 {
-        let pgrp: i32 = fields[2].parse().unwrap_or(0);
-        let tpgid: i32 = fields[5].parse().unwrap_or(-1);
-        pgrp == tpgid
-    } else {
-        true
+    if fields.len() <= 5 {
+        return None;
     }
+    let pgrp: i32 = fields[2].parse().ok()?;
+    let tpgid: i32 = fields[5].parse().ok()?;
+    Some((pgrp, tpgid))
+}
+
+/// Check whether the terminal is waiting for user input.
+/// Handles nested shells (e.g. `su root` spawning a new bash).
+fn is_terminal_idle(shell_pid: i32) -> bool {
+    let Some((pgrp, tpgid)) = parse_pgrp_tpgid(shell_pid) else {
+        return true;
+    };
+    if pgrp == tpgid {
+        return true; // Original shell is the foreground → idle.
+    }
+    // Something else is foreground. If the fg leader is a shell at a
+    // prompt (e.g. root bash from `su`), the terminal is still "idle".
+    if tpgid > 0 {
+        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", tpgid)) {
+            let name = comm.trim();
+            // Strip leading '-' (login shell convention, e.g. "-bash").
+            let name = name.strip_prefix('-').unwrap_or(name);
+            const SHELLS: &[&str] = &[
+                "bash", "zsh", "fish", "sh", "dash", "ksh", "csh", "tcsh",
+                "nu", "nushell", "elvish", "ion", "xonsh", "pwsh",
+            ];
+            if SHELLS.contains(&name) {
+                // The fg leader is a shell. Check that IT is the foreground
+                // (it hasn't spawned a child command that took over).
+                if let Some((fg_pgrp, fg_tpgid)) = parse_pgrp_tpgid(tpgid) {
+                    return fg_pgrp == fg_tpgid;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check whether the terminal's foreground process is running with root
+/// privileges (euid == 0). Used to tint the header bar red.
+fn is_foreground_elevated(shell_pid: i32) -> bool {
+    let Some((_pgrp, tpgid)) = parse_pgrp_tpgid(shell_pid) else {
+        return false;
+    };
+    if tpgid <= 0 {
+        return false;
+    }
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", tpgid)) else {
+        return false;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            // Uid: real effective saved filesystem
+            if let Some(euid_str) = fields.get(1) {
+                return euid_str.parse::<u32>().unwrap_or(u32::MAX) == 0;
+            }
+        }
+    }
+    false
 }
 
 /// Extract the source session id from a DropTarget's current drag.
