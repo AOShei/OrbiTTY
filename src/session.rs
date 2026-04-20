@@ -179,6 +179,7 @@ impl Session {
         let card_frame = gtk::Box::new(gtk::Orientation::Vertical, 4);
         card_frame.add_css_class("orbit-preview-card");
         card_frame.set_hexpand(true);
+        card_frame.set_vexpand(false);
 
         let card_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 
@@ -229,7 +230,9 @@ impl Session {
 
         let card_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
         card_slot.set_hexpand(true);
+        card_slot.set_vexpand(false);
         card_slot.set_size_request(-1, 140);
+        card_slot.set_overflow(gtk::Overflow::Hidden);
 
         card_frame.append(&card_header);
         card_frame.append(&card_slot);

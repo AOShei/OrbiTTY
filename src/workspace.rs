@@ -23,6 +23,9 @@ pub struct WorkspaceInner {
     /// Guard flag: suppress DragHoverEnter/Leave events while a preview rebuild
     /// is in progress (rebuild triggers spurious DropTarget enter/leave signals).
     pub suppressing_hover: Rc<Cell<bool>>,
+    /// Generation counter for drag hover events; stale leave callbacks skip
+    /// their clear when a newer enter has already incremented the counter.
+    pub drag_hover_gen: Rc<Cell<u32>>,
 }
 
 #[derive(Clone)]
@@ -59,6 +62,7 @@ impl Workspace {
             next_session_id: 1,
             last_focused_id: None,
             suppressing_hover: Rc::new(Cell::new(false)),
+            drag_hover_gen: Rc::new(Cell::new(0)),
         }));
 
         let workspace = Workspace { inner };
@@ -89,6 +93,8 @@ impl Workspace {
                         if let Some(inner_rc) = weak.upgrade() {
                             let arena = inner_rc.borrow().arena.clone();
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
+                            gen_rc.set(gen_rc.get().wrapping_add(1));
                             if !arena.is_full() {
                                 let slot = arena.slot_from_coords(x, y);
                                 glib::idle_add_local_once(move || {
@@ -126,8 +132,11 @@ impl Workspace {
                     dt.connect_leave(move |_dt| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
+                            let gen = gen_rc.get();
                             let ws = Workspace { inner: inner_rc };
                             glib::idle_add_local_once(move || {
+                                if gen_rc.get() != gen { return; }
                                 guard.set(true);
                                 ws.clear_all_previews();
                                 guard.set(false);
@@ -189,10 +198,11 @@ impl Workspace {
                 {
                     let weak = weak.clone();
                     dt.connect_enter(move |_dt, _x, y| {
-                        let y = y;
                         if let Some(inner_rc) = weak.upgrade() {
                             let sidebar = inner_rc.borrow().sidebar.clone();
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
+                            gen_rc.set(gen_rc.get().wrapping_add(1));
                             glib::idle_add_local_once(move || {
                                 guard.set(true);
                                 sidebar.show_placeholder(y);
@@ -217,8 +227,11 @@ impl Workspace {
                     dt.connect_leave(move |_dt| {
                         if let Some(inner_rc) = weak.upgrade() {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
+                            let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
+                            let gen = gen_rc.get();
                             let ws = Workspace { inner: inner_rc };
                             glib::idle_add_local_once(move || {
+                                if gen_rc.get() != gen { return; }
                                 guard.set(true);
                                 ws.clear_all_previews();
                                 guard.set(false);
@@ -232,9 +245,17 @@ impl Workspace {
                         let Ok(source_id) = value.get::<u32>() else { return false };
                         if let Some(inner_rc) = weak.upgrade() {
                             let ws = Workspace { inner: inner_rc };
+                            let (arena, sidebar) = {
+                                let inner = ws.inner.borrow();
+                                (inner.arena.clone(), inner.sidebar.clone())
+                            };
+                            // Capture insertion index from placeholder before clearing.
+                            let insert_idx = sidebar.placeholder_insert_index();
                             ws.clear_all_previews();
-                            if ws.inner.borrow().arena.contains(source_id) {
+                            if arena.contains(source_id) {
                                 ws.demote(source_id);
+                            } else if sidebar.contains(source_id) {
+                                sidebar.reorder_to_index(source_id, insert_idx);
                             }
                         }
                         true
@@ -699,6 +720,10 @@ impl Workspace {
             (inner.arena.clone(), inner.sidebar.clone(), inner.suppressing_hover.clone())
         };
 
+        // Advance generation so any pending leave-clear idles become stale.
+        let gen_rc = self.inner.borrow().drag_hover_gen.clone();
+        gen_rc.set(gen_rc.get().wrapping_add(1));
+
         let source_in_sidebar = sidebar.contains(source_id);
         let target_in_arena = arena.contains(target_id);
 
@@ -718,7 +743,13 @@ impl Workspace {
     /// Handle drag hover leaving a session's drop zone.
     fn handle_drag_hover_leave(&self, _source_id: u32, _target_id: u32) {
         let weak = Rc::downgrade(&self.inner);
+        let gen_rc = self.inner.borrow().drag_hover_gen.clone();
+        let gen = gen_rc.get();
         glib::idle_add_local_once(move || {
+            // Skip if a newer enter has already fired (generation advanced).
+            if gen_rc.get() != gen {
+                return;
+            }
             if let Some(inner_rc) = weak.upgrade() {
                 let guard = inner_rc.borrow().suppressing_hover.clone();
                 guard.set(true);

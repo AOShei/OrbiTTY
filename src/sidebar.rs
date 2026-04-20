@@ -34,6 +34,7 @@ impl Sidebar {
 
         let list = gtk::Box::new(gtk::Orientation::Vertical, 6);
         list.set_hexpand(true);
+        list.set_valign(gtk::Align::Start);
 
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -102,6 +103,48 @@ impl Sidebar {
         } else {
             self.list.append(&session.card_frame());
         }
+    }
+
+    /// Reorder: move session `source_id` to the given index in the list.
+    pub fn reorder_to_index(&self, source_id: u32, index: usize) {
+        let mut v = self.sessions.borrow_mut();
+        let Some(src_pos) = v.iter().position(|s| s.id() == source_id) else { return };
+        let session = v.remove(src_pos);
+        let clamped = index.min(v.len());
+        v.insert(clamped, session.clone());
+        drop(v);
+        self.list.remove(&session.card_frame());
+        let sessions = self.sessions.borrow();
+        if clamped == 0 {
+            self.list.prepend(&session.card_frame());
+        } else if let Some(prev) = sessions.get(clamped.saturating_sub(1)) {
+            self.list.insert_child_after(&session.card_frame(), Some(&prev.card_frame()));
+        } else {
+            self.list.append(&session.card_frame());
+        }
+    }
+
+    /// Return the insertion index that the placeholder is currently at.
+    pub fn placeholder_insert_index(&self) -> usize {
+        let placeholder = self.placeholder.borrow();
+        let Some(ph) = placeholder.as_ref() else { return 0 };
+        if ph.parent().is_none() {
+            return 0;
+        }
+        // Walk the list children and count the position of the placeholder.
+        let sessions = self.sessions.borrow();
+        let mut idx = 0;
+        for s in sessions.iter() {
+            let card = s.card_frame();
+            // If the placeholder comes before this card, we've found the index.
+            if let Some(prev) = card.prev_sibling() {
+                if prev == ph.clone().upcast::<gtk::Widget>() {
+                    return idx;
+                }
+            }
+            idx += 1;
+        }
+        idx
     }
 
     #[allow(dead_code)]
