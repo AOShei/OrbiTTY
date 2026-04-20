@@ -95,9 +95,11 @@ impl Workspace {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             gen_rc.set(gen_rc.get().wrapping_add(1));
+                            let gen = gen_rc.get();
                             if !arena.is_full() {
                                 let slot = arena.slot_from_coords(x, y);
                                 glib::idle_add_local_once(move || {
+                                    if gen_rc.get() != gen { return; }
                                     guard.set(true);
                                     arena.show_phantom_at(slot);
                                     guard.set(false);
@@ -116,7 +118,10 @@ impl Workspace {
                             if !arena.is_full() {
                                 let slot = arena.slot_from_coords(x, y);
                                 if slot != arena.phantom_slot() {
+                                    let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
+                                    let gen = gen_rc.get();
                                     glib::idle_add_local_once(move || {
+                                        if gen_rc.get() != gen { return; }
                                         guard.set(true);
                                         arena.move_phantom_to(slot);
                                         guard.set(false);
@@ -203,7 +208,9 @@ impl Workspace {
                             let guard = inner_rc.borrow().suppressing_hover.clone();
                             let gen_rc = inner_rc.borrow().drag_hover_gen.clone();
                             gen_rc.set(gen_rc.get().wrapping_add(1));
+                            let gen = gen_rc.get();
                             glib::idle_add_local_once(move || {
+                                if gen_rc.get() != gen { return; }
                                 guard.set(true);
                                 sidebar.show_placeholder(y);
                                 guard.set(false);
@@ -723,6 +730,7 @@ impl Workspace {
         // Advance generation so any pending leave-clear idles become stale.
         let gen_rc = self.inner.borrow().drag_hover_gen.clone();
         gen_rc.set(gen_rc.get().wrapping_add(1));
+        let gen = gen_rc.get();
 
         let source_in_sidebar = sidebar.contains(source_id);
         let target_in_arena = arena.contains(target_id);
@@ -731,6 +739,7 @@ impl Workspace {
         if source_in_sidebar && target_in_arena && !arena.is_full() {
             let slot = arena.session_ids().iter().position(|&x| x == target_id).unwrap_or(0);
             glib::idle_add_local_once(move || {
+                if gen_rc.get() != gen { return; }
                 guard.set(true);
                 arena.show_phantom_at(slot);
                 guard.set(false);
