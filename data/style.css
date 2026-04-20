@@ -158,35 +158,38 @@
 /* Elevated privilege (root): tinted header matching GNOME Console.
    High-specificity selectors ensure the red tint wins over focused
    and dragging overrides.
-   Dark: #3f1919, Light: #ffd1ce — muted reds that match the theme. */
-.orbit-tile-header.elevated,
-.orbit-tile.focused .orbit-tile-header.elevated,
-.orbit-workspace.dragging .orbit-tile.focused .orbit-tile-header.elevated {
+   Dark: #3f1919, Light: #ffd1ce — muted reds that match the theme.
+   Toggled via Rust using AdwStyleManager::is_dark(). */
+.orbit-tile-header.elevated-dark,
+.orbit-tile.focused .orbit-tile-header.elevated-dark,
+.orbit-workspace.dragging .orbit-tile.focused .orbit-tile-header.elevated-dark {
     background: #3f1919;
     border-bottom-color: alpha(#ff6b6b, 0.25);
+}
+
+.orbit-tile-header.elevated-light,
+.orbit-tile.focused .orbit-tile-header.elevated-light,
+.orbit-workspace.dragging .orbit-tile.focused .orbit-tile-header.elevated-light {
+    background: #ffd1ce;
+    border-bottom-color: alpha(#ff6b6b, 0.3);
 }
 
 .orbit-card-header {
     transition: background 200ms ease;
 }
 
-.orbit-card-header.elevated {
+.orbit-card-header.elevated-dark {
     background: #3f1919;
     border-radius: 8px 8px 0 0;
     margin: -6px -6px 0 -6px;
     padding: 6px;
 }
 
-@media (prefers-color-scheme: light) {
-    .orbit-tile-header.elevated,
-    .orbit-tile.focused .orbit-tile-header.elevated,
-    .orbit-workspace.dragging .orbit-tile.focused .orbit-tile-header.elevated {
-        background: #ffd1ce;
-        border-bottom-color: alpha(#ff6b6b, 0.3);
-    }
-    .orbit-card-header.elevated {
-        background: #ffd1ce;
-    }
+.orbit-card-header.elevated-light {
+    background: #ffd1ce;
+    border-radius: 8px 8px 0 0;
+    margin: -6px -6px 0 -6px;
+    padding: 6px;
 }
 
 .orbit-tile-title {

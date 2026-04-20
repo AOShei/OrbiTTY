@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gtk4 as gtk;
+use libadwaita as adw;
 use vte4::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -575,12 +576,19 @@ impl Session {
             return;
         }
         inner.elevated = elevated;
-        if elevated {
-            inner.tile_header.add_css_class("elevated");
-            inner.card_header.add_css_class("elevated");
+        let dark = adw::StyleManager::default().is_dark();
+        let (add, remove) = if dark {
+            ("elevated-dark", "elevated-light")
         } else {
-            inner.tile_header.remove_css_class("elevated");
-            inner.card_header.remove_css_class("elevated");
+            ("elevated-light", "elevated-dark")
+        };
+        for header in [&inner.tile_header, &inner.card_header] {
+            header.remove_css_class(remove);
+            if elevated {
+                header.add_css_class(add);
+            } else {
+                header.remove_css_class(add);
+            }
         }
     }
 
