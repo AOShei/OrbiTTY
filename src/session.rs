@@ -320,6 +320,18 @@ impl Session {
                 (cb.borrow())(id, SessionEvent::RequestClose);
             });
         }
+        {
+            // Track window title (user@host:path) set by the shell.
+            let weak = Rc::downgrade(&session.inner);
+            vte.connect_window_title_changed(move |vte| {
+                if let Some(inner_rc) = weak.upgrade() {
+                    let title = vte.window_title().unwrap_or_default();
+                    let inner = inner_rc.borrow();
+                    inner.tile_title.set_text(&title);
+                    inner.card_title.set_text(&title);
+                }
+            });
+        }
         // Drop target on tile for arena swap.
         {
             let cb = cb.clone();
