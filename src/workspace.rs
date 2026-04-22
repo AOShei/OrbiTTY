@@ -1,5 +1,6 @@
-use gtk::prelude::*;
+use adw::prelude::*;
 use gtk4 as gtk;
+use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
@@ -396,7 +397,7 @@ impl Workspace {
             match event {
                 SessionEvent::RequestPromote => ws.promote(id),
                 SessionEvent::RequestDemote => ws.demote(id),
-                SessionEvent::RequestClose => ws.close_session(id),
+                SessionEvent::RequestClose => ws.request_close(id),
                 SessionEvent::RequestClone => ws.clone_session(id),
                 SessionEvent::RequestSwap(source_id) => ws.handle_drop(source_id, id),
                 SessionEvent::Focused => ws.focus_session(id),
@@ -782,6 +783,58 @@ impl Workspace {
         let name = format!("Shell {}", self.inner.borrow().next_session_id);
         let session = self.spawn_session(&name, dir, true);
         session.grab_focus();
+    }
+
+    /// Entry point for close-button clicks. If the session has an active
+    /// foreground process, prompt for confirmation before tearing it down;
+    /// otherwise close immediately.
+    pub fn request_close(&self, id: u32) {
+        let Some(session) = self.find(id) else { return };
+        if !session.is_busy() {
+            self.close_session(id);
+            return;
+        }
+
+        let name = session.name();
+        let cmdline = session.foreground_process_cmdline();
+        let body = format!(
+            "A process is still running in \u{201C}{}\u{201D}. Closing the terminal will terminate it.",
+            name
+        );
+        let dialog = adw::AlertDialog::new(Some("Close this terminal?"), Some(&body));
+        dialog.add_response("cancel", "_Cancel");
+        dialog.add_response("close", "_Close Terminal");
+        dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        // prefer-wide-layout is libadwaita >= 1.6; the typed setter is gated
+        // behind the v1_6 feature, so set it dynamically. libadwaita gracefully
+        // ignores unknown properties on older runtimes.
+        dialog.set_property("prefer-wide-layout", true);
+
+        // GNOME Console-style command bubble between the body and the buttons.
+        if let Some(cmd) = cmdline {
+            let cmd_label = gtk::Label::new(Some(&cmd));
+            cmd_label.set_xalign(0.0);
+            cmd_label.set_halign(gtk::Align::Fill);
+            cmd_label.set_hexpand(true);
+            cmd_label.set_selectable(true);
+            cmd_label.set_wrap(true);
+            cmd_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            cmd_label.add_css_class("monospace");
+            cmd_label.add_css_class("orbit-close-dialog-command");
+            dialog.set_extra_child(Some(&cmd_label));
+        }
+
+        let ws = self.clone();
+        dialog.connect_response(None, move |_dlg, response| {
+            if response == "close" {
+                ws.close_session(id);
+            }
+        });
+
+        let parent = self.inner.borrow().root.clone();
+        dialog.present(Some(&parent));
     }
 
     /// Tear down a session: remove from arena/sidebar and drop from registry.

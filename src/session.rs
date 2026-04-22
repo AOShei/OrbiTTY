@@ -75,14 +75,8 @@ pub struct SessionInner {
     pub card_pip: gtk::Box,
     pub promote_btn: gtk::Button,
     pub card_close_btn: gtk::Button,
-    /// Dock card preview lines (3 monospaced tail lines of VTE output).
-    pub preview_lines: Vec<gtk::Label>,
     /// Metrics caption ("idle 15s", "busy 2m").
     pub metrics_label: gtk::Label,
-    /// Off-tree holder that keeps the VTE alive + running while the session
-    /// is demoted. VTE lives here whenever the card is in the sidebar; the
-    /// card body itself only renders the preview snapshot.
-    pub holder: gtk::Box,
 
     pub location: Location,
     pub pip_state: PipState,
@@ -273,38 +267,17 @@ impl Session {
         card_slot.set_overflow(gtk::Overflow::Hidden);
         card_slot.add_css_class("orbit-card-body");
 
-        let preview_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        preview_box.set_hexpand(true);
-        preview_box.set_vexpand(true);
-
-        let preview_lines: Vec<gtk::Label> = (0..3)
-            .map(|_| {
-                let lbl = gtk::Label::new(None);
-                lbl.set_halign(gtk::Align::Start);
-                lbl.set_xalign(0.0);
-                lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                lbl.set_single_line_mode(true);
-                lbl.add_css_class("orbit-card-preview-line");
-                preview_box.append(&lbl);
-                lbl
-            })
-            .collect();
-
         let metrics_label = gtk::Label::new(None);
         metrics_label.set_halign(gtk::Align::Start);
         metrics_label.set_xalign(0.0);
         metrics_label.add_css_class("orbit-card-metrics");
 
-        card_slot.append(&preview_box);
+        // Live VTE is reparented into card_slot before metrics_label when the
+        // session is in the sidebar; see place_in_sidebar/place_in_arena/peek.
         card_slot.append(&metrics_label);
 
         card_frame.append(&card_header);
         card_frame.append(&card_slot);
-
-        // Off-tree holder: the VTE parents here when the session is demoted,
-        // so the PTY/subprocess keeps running without the card having to
-        // display the live terminal.
-        let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
         let inner = Rc::new(RefCell::new(SessionInner {
             id,
@@ -326,9 +299,7 @@ impl Session {
             card_pip,
             promote_btn: promote_btn.clone(),
             card_close_btn: card_close_btn.clone(),
-            preview_lines,
             metrics_label,
-            holder,
             location: Location::Sidebar, // will be placed by workspace
             pip_state: PipState::Idle,
             elevated: false,
@@ -391,11 +362,17 @@ impl Session {
         }
         // Click on the card body (preview area) opens the peek popover.
         // The header keeps its own drag-source / focus / button behavior.
+        // Capture phase + claim preempts the live-preview VTE's own gestures
+        // (selection, focus) so the entire card reads as a clickable surface.
         {
             let session_weak = Rc::downgrade(&session.inner);
             let card_slot = session.inner.borrow().card_slot.clone();
             let gesture = gtk::GestureClick::new();
             gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
+            gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+            gesture.connect_pressed(move |g, _, _, _| {
+                g.set_state(gtk::EventSequenceState::Claimed);
+            });
             gesture.connect_released(move |_, _, _, _| {
                 if let Some(inner_rc) = session_weak.upgrade() {
                     Session { inner: inner_rc }.peek();
@@ -411,6 +388,36 @@ impl Session {
                 (cb.borrow())(id, SessionEvent::Focused);
             });
             vte.add_controller(ctl);
+        }
+        {
+            // Ctrl+Shift+C / Ctrl+Shift+V for copy/paste. VTE doesn't bind
+            // these itself; intercept during the capture phase so the
+            // terminal doesn't swallow them as input first.
+            let vte_kb = vte.clone();
+            let key_ctl = gtk::EventControllerKey::new();
+            key_ctl.set_propagation_phase(gtk::PropagationPhase::Capture);
+            key_ctl.connect_key_pressed(move |_, keyval, _keycode, state| {
+                use gtk::gdk::ModifierType;
+                let mods = state
+                    & (ModifierType::CONTROL_MASK
+                        | ModifierType::SHIFT_MASK
+                        | ModifierType::ALT_MASK);
+                if mods != (ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK) {
+                    return glib::Propagation::Proceed;
+                }
+                match keyval.to_lower() {
+                    gtk::gdk::Key::c => {
+                        vte_kb.copy_clipboard_format(vte4::Format::Text);
+                        glib::Propagation::Stop
+                    }
+                    gtk::gdk::Key::v => {
+                        vte_kb.paste_clipboard();
+                        glib::Propagation::Stop
+                    }
+                    _ => glib::Propagation::Proceed,
+                }
+            });
+            vte.add_controller(key_ctl);
         }
         {
             // Bell → alert pip.
@@ -635,12 +642,9 @@ impl Session {
                 inner.tile_slot.clone(),
             )
         };
-        if let Some(parent) = vte_widget.parent() {
-            if let Some(parent_box) = parent.downcast_ref::<gtk::Box>() {
-                parent_box.remove(&vte_widget);
-            }
-        }
+        unparent_from_box(&vte_widget);
         tile_slot.append(&vte_widget);
+        set_vte_interactive(&self.inner.borrow().vte, true);
         self.inner.borrow_mut().location = Location::Arena;
         // Promotion means the user is now looking at the session directly;
         // any pending attention alert is implicitly acknowledged.
@@ -648,44 +652,32 @@ impl Session {
     }
 
     pub fn place_in_sidebar(&self) {
-        let (vte_widget, holder) = {
+        let (vte_widget, card_slot) = {
             let inner = self.inner.borrow();
             (
                 inner.vte.clone().upcast::<gtk::Widget>(),
-                inner.holder.clone(),
+                inner.card_slot.clone(),
             )
         };
-        if let Some(parent) = vte_widget.parent() {
-            if let Some(parent_box) = parent.downcast_ref::<gtk::Box>() {
-                parent_box.remove(&vte_widget);
-            }
-        }
-        holder.append(&vte_widget);
+        unparent_from_box(&vte_widget);
+        // Prepend so metrics_label stays as the final child below the VTE.
+        card_slot.insert_child_after(&vte_widget, None::<&gtk::Widget>);
+        set_vte_interactive(&self.inner.borrow().vte, false);
         self.inner.borrow_mut().location = Location::Sidebar;
-        // Seed the preview right away; the 250ms poll will keep it fresh.
         self.refresh_preview();
     }
 
-    /// Read the last 3 non-empty lines from the VTE and push them into the
-    /// preview labels. Also refreshes the metrics caption based on current
-    /// busy/idle state.
+    /// Refresh the metrics caption ("idle 15s", "busy 2m") based on current
+    /// busy/idle state. The live VTE handles its own rendering.
     pub fn refresh_preview(&self) {
-        let (vte, preview_lines, metrics_label, is_busy, state_since) = {
+        let (metrics_label, is_busy, state_since) = {
             let inner = self.inner.borrow();
             (
-                inner.vte.clone(),
-                inner.preview_lines.clone(),
                 inner.metrics_label.clone(),
                 inner.is_busy,
                 inner.state_since,
             )
         };
-
-        let lines = sample_recent_lines(&vte, preview_lines.len());
-        for (lbl, text) in preview_lines.iter().zip(lines.iter()) {
-            lbl.set_text(text);
-        }
-
         let state = if is_busy { "busy" } else { "idle" };
         let elapsed = Instant::now().saturating_duration_since(state_since);
         metrics_label.set_text(&format!("{} {}", state, format_duration_compact(elapsed)));
@@ -718,6 +710,14 @@ impl Session {
         self.inner.borrow().is_busy
     }
 
+    /// Full command line (e.g. "node /usr/bin/gemini") of the foreground
+    /// process if the terminal is currently busy; None when the shell is at
+    /// a prompt.
+    pub fn foreground_process_cmdline(&self) -> Option<String> {
+        let pid = self.inner.borrow().shell_pid?;
+        foreground_command(pid)
+    }
+
     pub fn has_attention(&self) -> bool {
         self.inner.borrow().attention
     }
@@ -745,10 +745,10 @@ impl Session {
     }
 
     /// Open a peek popover over the sidebar card: reparent the VTE from the
-    /// off-tree holder into the popover so the user can look at — and type
-    /// into — the terminal without promoting it to the arena. On dismiss the
-    /// VTE is reparented back to the holder and the preview snapshot is
-    /// refreshed. Peeking implicitly acknowledges any pending attention.
+    /// card's preview slot into the popover so the user can look at — and
+    /// type into — the terminal without promoting it to the arena. On dismiss
+    /// the VTE is reparented back into the card slot as the live read-only
+    /// preview. Peeking implicitly acknowledges any pending attention.
     ///
     /// No-op if the session is not in the sidebar or already being peeked.
     pub fn peek(&self) {
@@ -760,10 +760,11 @@ impl Session {
             return;
         }
 
-        let (card_frame, vte_widget) = {
+        let (card_frame, vte, vte_widget) = {
             let inner = self.inner.borrow();
             (
                 inner.card_frame.clone(),
+                inner.vte.clone(),
                 inner.vte.clone().upcast::<gtk::Widget>(),
             )
         };
@@ -772,12 +773,9 @@ impl Session {
         content.set_size_request(640, 400);
         content.add_css_class("orbit-peek-body");
 
-        if let Some(parent) = vte_widget.parent() {
-            if let Some(parent_box) = parent.downcast_ref::<gtk::Box>() {
-                parent_box.remove(&vte_widget);
-            }
-        }
+        unparent_from_box(&vte_widget);
         content.append(&vte_widget);
+        set_vte_interactive(&vte, true);
 
         let popover = gtk::Popover::new();
         popover.add_css_class("orbit-peek-popover");
@@ -787,24 +785,22 @@ impl Session {
         popover.set_has_arrow(true);
         popover.set_child(Some(&content));
 
-        // Reparent VTE back to the holder on close, refresh preview, and drop
-        // the popover from SessionInner so another peek can open.
+        // Reparent VTE back into the card slot (as read-only preview) on
+        // close, and drop the popover so another peek can open.
         {
             let session = self.clone();
             popover.connect_closed(move |pop| {
-                let (holder, vte_widget) = {
+                let (card_slot, vte, vte_widget) = {
                     let inner = session.inner.borrow();
                     (
-                        inner.holder.clone(),
+                        inner.card_slot.clone(),
+                        inner.vte.clone(),
                         inner.vte.clone().upcast::<gtk::Widget>(),
                     )
                 };
-                if let Some(parent) = vte_widget.parent() {
-                    if let Some(parent_box) = parent.downcast_ref::<gtk::Box>() {
-                        parent_box.remove(&vte_widget);
-                    }
-                }
-                holder.append(&vte_widget);
+                unparent_from_box(&vte_widget);
+                card_slot.insert_child_after(&vte_widget, None::<&gtk::Widget>);
+                set_vte_interactive(&vte, false);
                 session.inner.borrow_mut().peek_popover = None;
                 session.refresh_preview();
                 // Detach popover from its parent widget so the next peek
@@ -820,7 +816,6 @@ impl Session {
 
         popover.popup();
         // Let the user type immediately.
-        let vte = self.inner.borrow().vte.clone();
         vte.grab_focus();
     }
 
@@ -1003,6 +998,43 @@ fn is_terminal_idle(shell_pid: i32) -> bool {
     false
 }
 
+/// Full command line of the foreground process currently running in the
+/// terminal, or None when the shell itself is at a prompt. Descends through
+/// nested shells (e.g. `su -` spawning bash) to reach the actual command.
+///
+/// Reads `/proc/<pid>/cmdline` rather than `/proc/<pid>/comm` so the user
+/// sees the real argv — `comm` is truncated to 15 chars and reflects the
+/// thread name for runtimes that set one (Node.js → "MainThread").
+fn foreground_command(shell_pid: i32) -> Option<String> {
+    const SHELLS: &[&str] = &[
+        "bash", "zsh", "fish", "sh", "dash", "ksh", "csh", "tcsh",
+        "nu", "nushell", "elvish", "ion", "xonsh", "pwsh",
+    ];
+    let (pgrp, tpgid) = parse_pgrp_tpgid(shell_pid)?;
+    if tpgid <= 0 || pgrp == tpgid {
+        return None;
+    }
+    // Use comm only for the shell-detection check (recurse through nested
+    // shells). Comm is cheap and well-suited for that purpose.
+    let comm = std::fs::read_to_string(format!("/proc/{}/comm", tpgid)).ok()?;
+    let raw = comm.trim();
+    let name = raw.strip_prefix('-').unwrap_or(raw);
+    if SHELLS.contains(&name) {
+        return foreground_command(tpgid);
+    }
+    // Real command: read argv from /proc/<pid>/cmdline (null-separated).
+    let cmdline_bytes = std::fs::read(format!("/proc/{}/cmdline", tpgid)).ok()?;
+    let parts: Vec<String> = cmdline_bytes
+        .split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    if parts.is_empty() {
+        return Some(name.to_string());
+    }
+    Some(parts.join(" "))
+}
+
 /// Check whether the terminal's foreground process is running with root
 /// privileges (euid == 0). Used to tint the header bar red.
 fn is_foreground_elevated(shell_pid: i32) -> bool {
@@ -1035,35 +1067,44 @@ pub(crate) fn extract_source_id(dt: &gtk::DropTarget) -> Option<u32> {
     content.value(<u32 as glib::types::StaticType>::static_type()).ok()?.get::<u32>().ok()
 }
 
-/// Extract the last `n` non-empty lines from the VTE's visible buffer. Pads
-/// with empty strings so the returned vector always has length `n`.
-fn sample_recent_lines(vte: &vte4::Terminal, n: usize) -> Vec<String> {
-    let rows = vte.row_count();
-    let cols = vte.column_count();
-    if rows <= 0 || cols <= 0 || n == 0 {
-        return vec![String::new(); n];
+/// Detach `widget` from its current parent if that parent is a `gtk::Box`.
+/// Used to reparent the VTE between tile_slot / card_slot / peek popover.
+fn unparent_from_box(widget: &gtk::Widget) {
+    if let Some(parent) = widget.parent() {
+        if let Some(parent_box) = parent.downcast_ref::<gtk::Box>() {
+            parent_box.remove(widget);
+        }
     }
-    // Pull a generous window so blank trailing rows don't shrink our output.
-    let window = (n as i64 * 4).max(rows.min(16));
-    let start = (rows - window).max(0);
-    let (text_opt, _len) =
-        vte.text_range_format(vte4::Format::Text, start, 0, rows, cols);
-    let Some(text) = text_opt else {
-        return vec![String::new(); n];
-    };
-    let mut lines: Vec<String> = text
-        .lines()
-        .map(|l| l.trim_end().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-    if lines.len() > n {
-        let drop = lines.len() - n;
-        lines.drain(..drop);
+}
+
+/// Row count of the VTE when rendered as the dock's read-only preview.
+/// `set_size_request` only clamps the minimum — to actually *cap* VTE's
+/// natural height we have to pin its internal rows via `set_size`, which
+/// also sends SIGWINCH to the shell. Fine for line-based output; TUIs will
+/// redraw on demote/peek/promote.
+const PREVIEW_VTE_ROWS: i64 = 4;
+
+/// Toggle VTE between interactive (arena tile / peek popover) and read-only
+/// preview (sidebar card). Read-only mode blocks keystrokes, focus theft, and
+/// the blinking cursor so the card reads as a live snapshot, and pins VTE to
+/// a small row count so the card doesn't stretch to fill the dock.
+fn set_vte_interactive(vte: &vte4::Terminal, interactive: bool) {
+    vte.set_input_enabled(interactive);
+    vte.set_focusable(interactive);
+    vte.set_can_focus(interactive);
+    vte.set_can_target(interactive);
+    vte.set_cursor_blink_mode(if interactive {
+        vte4::CursorBlinkMode::System
+    } else {
+        vte4::CursorBlinkMode::Off
+    });
+    if interactive {
+        vte.set_vexpand(true);
+    } else {
+        vte.set_vexpand(false);
+        let cols = vte.column_count().max(20);
+        vte.set_size(cols, PREVIEW_VTE_ROWS);
     }
-    while lines.len() < n {
-        lines.push(String::new());
-    }
-    lines
 }
 
 /// Compact relative-duration format: `45s`, `3m`, `1h 12m`.
