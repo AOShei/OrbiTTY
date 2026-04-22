@@ -414,6 +414,20 @@ impl OrbitWindow {
             group.add_action(&a);
         }
 
+        // Alt+Space: peek the most-relevant sidebar card (attention first, else first).
+        {
+            let weak = Rc::downgrade(self);
+            let a = gio::SimpleAction::new("peek-sidebar", None);
+            a.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade() {
+                    if let Some(ws) = this.current_workspace() {
+                        ws.peek_best();
+                    }
+                }
+            });
+            group.add_action(&a);
+        }
+
         // Ctrl+Tab / Ctrl+Shift+Tab: cycle focus through arena sessions
         {
             let weak = Rc::downgrade(self);

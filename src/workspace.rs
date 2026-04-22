@@ -1,12 +1,24 @@
 use gtk::prelude::*;
 use gtk4 as gtk;
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
 use crate::arena::{Arena, MAX_ACTIVE};
 use crate::session::{Session, SessionCallback, SessionEvent};
 use crate::sidebar::Sidebar;
 use crate::templates::WorkspaceTemplate;
+
+/// Pool of animal emojis used to give each session a unique visual identity
+/// within a workspace. Exhausted only if a workspace holds more sessions than
+/// the pool size; duplicates are allowed past that point.
+static EMOJI_POOL: &[&str] = &[
+    "🦊", "🐼", "🐙", "🦉", "🐢", "🦄", "🐝", "🦒", "🐧", "🦋",
+    "🦁", "🐯", "🐨", "🐸", "🐵", "🐰", "🐺", "🐻", "🐹", "🐭",
+    "🦝", "🦔", "🦌", "🐷", "🐮", "🦙", "🦧", "🦥", "🦦", "🦨",
+    "🦩", "🦢", "🦜", "🦚", "🐬", "🐳", "🦈", "🦑", "🐡", "🐌",
+    "🦎", "🐍", "🦖", "🦕", "🦀",
+];
 
 pub struct WorkspaceInner {
     pub id: u32,
@@ -357,8 +369,9 @@ impl Workspace {
             id
         };
 
+        let emoji = self.allocate_emoji();
         let cb = self.make_session_callback();
-        let session = Session::new(sid, name, cwd, cb);
+        let session = Session::new(sid, name, &emoji, cwd, cb);
 
         self.inner.borrow_mut().registry.push(session.clone());
 
@@ -431,6 +444,31 @@ impl Workspace {
                 }
             }
         })))
+    }
+
+    /// Pick a random animal emoji not currently assigned to any session in
+    /// this workspace. Falls back to a random pool member if every emoji is
+    /// already in use.
+    fn allocate_emoji(&self) -> String {
+        let used: HashSet<String> = self
+            .inner
+            .borrow()
+            .registry
+            .iter()
+            .map(|s| s.emoji())
+            .collect();
+        let available: Vec<&str> = EMOJI_POOL
+            .iter()
+            .copied()
+            .filter(|e| !used.contains(*e))
+            .collect();
+        let pool: &[&str] = if available.is_empty() {
+            EMOJI_POOL
+        } else {
+            &available
+        };
+        let idx = glib::random_int_range(0, pool.len() as i32) as usize;
+        pool[idx].to_string()
     }
 
     pub fn find(&self, id: u32) -> Option<Session> {
@@ -624,6 +662,25 @@ impl Workspace {
         }
     }
 
+    /// Open the peek popover on the most-relevant sidebar card: prefer the
+    /// first card with raised attention, else the first sidebar card. No-op
+    /// if the sidebar is empty.
+    pub fn peek_best(&self) {
+        let target = {
+            let inner = self.inner.borrow();
+            let sidebar_ids = inner.sidebar.session_ids();
+            let by_id = |id: u32| inner.registry.iter().find(|s| s.id() == id).cloned();
+            sidebar_ids
+                .iter()
+                .filter_map(|id| by_id(*id))
+                .find(|s| s.has_attention())
+                .or_else(|| sidebar_ids.first().and_then(|id| by_id(*id)))
+        };
+        if let Some(s) = target {
+            s.peek();
+        }
+    }
+
     /// Demote the currently focused arena session to the sidebar. No-op if
     /// focus is in the sidebar or no session is focused in the arena.
     pub fn demote_focused(&self) {
@@ -729,27 +786,38 @@ impl Workspace {
 
     /// Tear down a session: remove from arena/sidebar and drop from registry.
     pub fn close_session(&self, id: u32) {
-        // Capture the arena position (if any) before removing, so we can
-        // focus the neighbour immediately to the left.
-        let arena_idx = {
+        let (arena_idx, arena, sidebar) = {
             let inner = self.inner.borrow();
-            if inner.arena.contains(id) {
+            // Short-circuit if the session was already torn down (e.g. a
+            // deferred child-exited callback racing a manual close).
+            if !inner.registry.iter().any(|s| s.id() == id) {
+                return;
+            }
+            let idx = if inner.arena.contains(id) {
                 inner.arena.session_ids().iter().position(|x| *x == id)
             } else {
                 None
-            }
+            };
+            (idx, inner.arena.clone(), inner.sidebar.clone())
         };
 
-        let (arena, sidebar) = {
-            let inner = self.inner.borrow();
-            (inner.arena.clone(), inner.sidebar.clone())
-        };
         if arena_idx.is_some() {
             arena.remove(id);
         } else {
             sidebar.remove(id);
         }
-        self.inner.borrow_mut().registry.retain(|s| s.id() != id);
+
+        // Pop the Session out first, then let it drop *after* the borrow is
+        // released. Dropping can synchronously emit signals (VTE child-exited)
+        // that re-enter Workspace; holding a borrow across that is a panic.
+        let removed = {
+            let mut inner = self.inner.borrow_mut();
+            inner.registry
+                .iter()
+                .position(|s| s.id() == id)
+                .map(|p| inner.registry.remove(p))
+        };
+        drop(removed);
 
         if let Some(i) = arena_idx {
             // Closed an arena session: focus the previous arena position. If

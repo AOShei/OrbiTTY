@@ -2,10 +2,19 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::session::Session;
 
-/// The right-hand "Monitoring Sidebar" holding inactive session cards.
+/// Which subset of dock cards is visible.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FilterMode {
+    All,
+    Busy,
+    Attention,
+}
+
+/// The right-hand dock holding demoted session cards.
 #[derive(Clone)]
 pub struct Sidebar {
     pub root: gtk::Box,
@@ -16,6 +25,9 @@ pub struct Sidebar {
     placeholder: Rc<RefCell<Option<gtk::Box>>>,
     /// The session id currently being dragged (for smart placeholder positioning).
     dragging_id: Rc<Cell<Option<u32>>>,
+    filter_mode: Rc<Cell<FilterMode>>,
+    edge_above: gtk::Button,
+    edge_below: gtk::Button,
 }
 
 impl Sidebar {
@@ -24,15 +36,45 @@ impl Sidebar {
         root.add_css_class("orbit-sidebar");
         root.set_width_request(260);
 
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        // --- Header: filter toggle group ---
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        header.add_css_class("orbit-sidebar-header");
         header.set_margin_bottom(6);
 
-        let title = gtk::Label::new(Some("Monitoring"));
-        title.add_css_class("heading");
-        title.set_halign(gtk::Align::Start);
-        title.set_hexpand(true);
+        let filter_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        filter_box.add_css_class("linked");
+        filter_box.set_hexpand(true);
 
-        header.append(&title);
+        let btn_all = gtk::ToggleButton::with_label("All");
+        btn_all.set_active(true);
+        btn_all.set_hexpand(true);
+        btn_all.add_css_class("orbit-filter-pill");
+        let btn_busy = gtk::ToggleButton::with_label("Busy");
+        btn_busy.set_group(Some(&btn_all));
+        btn_busy.set_hexpand(true);
+        btn_busy.add_css_class("orbit-filter-pill");
+        let btn_attn = gtk::ToggleButton::with_label("Attn");
+        btn_attn.set_group(Some(&btn_all));
+        btn_attn.set_hexpand(true);
+        btn_attn.add_css_class("orbit-filter-pill");
+
+        filter_box.append(&btn_all);
+        filter_box.append(&btn_busy);
+        filter_box.append(&btn_attn);
+        header.append(&filter_box);
+
+        // --- Edge attention indicators ---
+        let edge_above = gtk::Button::with_label("↑ 0");
+        edge_above.add_css_class("orbit-attn-edge");
+        edge_above.add_css_class("flat");
+        edge_above.set_tooltip_text(Some("Attention above — click to scroll"));
+        edge_above.set_visible(false);
+
+        let edge_below = gtk::Button::with_label("↓ 0");
+        edge_below.add_css_class("orbit-attn-edge");
+        edge_below.add_css_class("flat");
+        edge_below.set_tooltip_text(Some("Attention below — click to scroll"));
+        edge_below.set_visible(false);
 
         let list = gtk::Box::new(gtk::Orientation::Vertical, 6);
         list.set_hexpand(true);
@@ -45,17 +87,207 @@ impl Sidebar {
             .build();
         scroller.set_child(Some(&list));
 
-        root.append(&header);
-        root.append(&scroller);
+        let scroll_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        scroll_area.set_vexpand(true);
+        scroll_area.append(&edge_above);
+        scroll_area.append(&scroller);
+        scroll_area.append(&edge_below);
 
-        Sidebar {
+        root.append(&header);
+        root.append(&scroll_area);
+
+        let sidebar = Sidebar {
             root,
             list,
             scroller,
             sessions: Rc::new(RefCell::new(Vec::new())),
             placeholder: Rc::new(RefCell::new(None)),
             dragging_id: Rc::new(Cell::new(None)),
+            filter_mode: Rc::new(Cell::new(FilterMode::All)),
+            edge_above: edge_above.clone(),
+            edge_below: edge_below.clone(),
+        };
+
+        // Wire filter toggles. Only fire on activation to ignore deactivation
+        // signals that pair with the new selection (avoids double work).
+        {
+            let s = sidebar.clone();
+            btn_all.connect_toggled(move |b| {
+                if b.is_active() {
+                    s.filter_mode.set(FilterMode::All);
+                    s.apply_filter();
+                    s.update_edge_indicators();
+                }
+            });
         }
+        {
+            let s = sidebar.clone();
+            btn_busy.connect_toggled(move |b| {
+                if b.is_active() {
+                    s.filter_mode.set(FilterMode::Busy);
+                    s.apply_filter();
+                    s.update_edge_indicators();
+                }
+            });
+        }
+        {
+            let s = sidebar.clone();
+            btn_attn.connect_toggled(move |b| {
+                if b.is_active() {
+                    s.filter_mode.set(FilterMode::Attention);
+                    s.apply_filter();
+                    s.update_edge_indicators();
+                }
+            });
+        }
+
+        // Edge-indicator click → scroll to the nearest off-screen attention card.
+        {
+            let s = sidebar.clone();
+            edge_above.connect_clicked(move |_| s.scroll_to_attention_above());
+        }
+        {
+            let s = sidebar.clone();
+            edge_below.connect_clicked(move |_| s.scroll_to_attention_below());
+        }
+
+        sidebar.start_polling();
+        sidebar
+    }
+
+    /// Iterate sessions and set card visibility per the active filter.
+    fn apply_filter(&self) {
+        let mode = self.filter_mode.get();
+        let sessions = self.sessions.borrow();
+        for s in sessions.iter() {
+            let show = match mode {
+                FilterMode::All => true,
+                FilterMode::Busy => s.is_busy(),
+                FilterMode::Attention => s.has_attention(),
+            };
+            s.card_frame().set_visible(show);
+        }
+    }
+
+    /// Count visible attention cards fully above / fully below the scroller's
+    /// current viewport and update the edge indicator labels and visibility.
+    fn update_edge_indicators(&self) {
+        let adj = self.scroller.vadjustment();
+        let view_top = adj.value();
+        let view_bot = view_top + adj.page_size();
+
+        let mut above = 0u32;
+        let mut below = 0u32;
+
+        let sessions = self.sessions.borrow();
+        for s in sessions.iter() {
+            if !s.has_attention() {
+                continue;
+            }
+            let card = s.card_frame();
+            if !card.is_visible() {
+                continue;
+            }
+            let Some(p) = card.compute_point(&self.list, &gtk::graphene::Point::new(0.0, 0.0))
+            else {
+                continue;
+            };
+            let card_y = p.y() as f64;
+            let card_h = card.height() as f64;
+            if card_h <= 0.0 {
+                continue; // not allocated yet
+            }
+            if card_y + card_h <= view_top {
+                above += 1;
+            } else if card_y >= view_bot {
+                below += 1;
+            }
+        }
+
+        if above > 0 {
+            self.edge_above.set_label(&format!("↑ {} attention", above));
+            self.edge_above.set_visible(true);
+        } else {
+            self.edge_above.set_visible(false);
+        }
+        if below > 0 {
+            self.edge_below.set_label(&format!("↓ {} attention", below));
+            self.edge_below.set_visible(true);
+        } else {
+            self.edge_below.set_visible(false);
+        }
+    }
+
+    fn scroll_to_attention_above(&self) {
+        let adj = self.scroller.vadjustment();
+        let view_top = adj.value();
+        let sessions = self.sessions.borrow();
+        // Closest attention card whose bottom is <= view_top: the one with
+        // the LARGEST y still below view_top.
+        let mut best: Option<f64> = None;
+        for s in sessions.iter() {
+            if !s.has_attention() {
+                continue;
+            }
+            let card = s.card_frame();
+            if !card.is_visible() {
+                continue;
+            }
+            let Some(p) = card.compute_point(&self.list, &gtk::graphene::Point::new(0.0, 0.0))
+            else {
+                continue;
+            };
+            let card_y = p.y() as f64;
+            let card_h = card.height() as f64;
+            if card_y + card_h <= view_top {
+                if best.map_or(true, |b| card_y > b) {
+                    best = Some(card_y);
+                }
+            }
+        }
+        if let Some(y) = best {
+            adj.set_value(y);
+        }
+    }
+
+    fn scroll_to_attention_below(&self) {
+        let adj = self.scroller.vadjustment();
+        let view_bot = adj.value() + adj.page_size();
+        let sessions = self.sessions.borrow();
+        // Closest attention card whose top is >= view_bot: smallest y above view_bot.
+        let mut best: Option<f64> = None;
+        for s in sessions.iter() {
+            if !s.has_attention() {
+                continue;
+            }
+            let card = s.card_frame();
+            if !card.is_visible() {
+                continue;
+            }
+            let Some(p) = card.compute_point(&self.list, &gtk::graphene::Point::new(0.0, 0.0))
+            else {
+                continue;
+            };
+            let card_y = p.y() as f64;
+            if card_y >= view_bot {
+                if best.map_or(true, |b| card_y < b) {
+                    best = Some(card_y);
+                }
+            }
+        }
+        if let Some(y) = best {
+            // Aim to align the card top near the viewport top.
+            adj.set_value(y);
+        }
+    }
+
+    fn start_polling(&self) {
+        let s = self.clone();
+        glib::timeout_add_local(Duration::from_millis(250), move || {
+            s.apply_filter();
+            s.update_edge_indicators();
+            glib::ControlFlow::Continue
+        });
     }
 
     pub fn widget(&self) -> gtk::Box {

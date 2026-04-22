@@ -29,6 +29,76 @@
     font-size: 0.9em;
 }
 
+.orbit-session-emoji {
+    font-size: 0.95em;
+    margin-right: 2px;
+    padding: 0;
+}
+
+.orbit-card-body {
+    padding: 4px 6px 2px 6px;
+}
+
+.orbit-card-preview-line {
+    font-family: monospace;
+    font-size: 0.78em;
+    color: alpha(@window_fg_color, 0.65);
+    padding: 0;
+    margin: 0;
+    min-height: 1.1em;
+}
+
+.orbit-card-metrics {
+    font-size: 0.72em;
+    color: alpha(@window_fg_color, 0.45);
+    padding-top: 2px;
+    margin: 0;
+}
+
+/* Attention state: slow amber pulse on the card frame.
+   Distinct from .active (accent) and from the red bell Alert pip. */
+@keyframes orbit-attention-pulse {
+    0%   { border-color: alpha(@warning_color, 0.45);
+           box-shadow: 0 0 0 0 alpha(@warning_color, 0.0); }
+    50%  { border-color: @warning_color;
+           box-shadow: 0 0 10px 1px alpha(@warning_color, 0.55); }
+    100% { border-color: alpha(@warning_color, 0.45);
+           box-shadow: 0 0 0 0 alpha(@warning_color, 0.0); }
+}
+
+.orbit-preview-card.attention {
+    border-color: @warning_color;
+    animation: orbit-attention-pulse 1.6s ease-in-out infinite;
+}
+
+/* Filter pills in the sidebar header: compact, segmented look. */
+.orbit-sidebar-header {
+    padding: 2px 2px 6px 2px;
+}
+
+.orbit-filter-pill {
+    font-size: 0.78em;
+    padding: 2px 8px;
+    min-height: 22px;
+}
+
+/* Edge attention indicators: flat amber bar at top/bottom of scroll area. */
+.orbit-attn-edge {
+    font-size: 0.75em;
+    padding: 2px 6px;
+    min-height: 20px;
+    margin: 1px 0;
+    color: @warning_color;
+    background: alpha(@warning_color, 0.10);
+    border: 1px solid alpha(@warning_color, 0.35);
+    border-radius: 6px;
+}
+
+.orbit-attn-edge:hover {
+    background: alpha(@warning_color, 0.18);
+    border-color: alpha(@warning_color, 0.55);
+}
+
 .orbit-pip {
     min-width: 12px;
     min-height: 12px;

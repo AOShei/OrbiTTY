@@ -506,7 +506,7 @@ fn build_empty_state() -> gtk::Box {
     title.add_css_class("title-2");
 
     let subtitle = gtk::Label::new(Some(
-        "Promote a session from the sidebar, or press Ctrl+Shift+N for a new shell.",
+        "Press Ctrl+Shift+Return for a new shell.",
     ));
     subtitle.set_wrap(true);
     subtitle.set_justify(gtk::Justification::Center);
