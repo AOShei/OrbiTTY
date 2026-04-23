@@ -663,10 +663,11 @@ impl Session {
             return;
         }
 
-        let (card_frame, vte, vte_widget) = {
+        let (card_frame, card_slot, vte, vte_widget) = {
             let inner = self.inner.borrow();
             (
                 inner.card_frame.clone(),
+                inner.card_slot.clone(),
                 inner.vte.clone(),
                 inner.vte.clone().upcast::<gtk::Widget>(),
             )
@@ -676,7 +677,26 @@ impl Session {
         content.set_size_request(640, 400);
         content.add_css_class("orbit-peek-body");
 
+        // Placeholder shown in the card slot while the VTE lives in the popover.
+        let placeholder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        placeholder.set_vexpand(true);
+        placeholder.set_hexpand(true);
+        placeholder.add_css_class("orbit-peek-placeholder");
+        let ph_center = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        ph_center.set_valign(gtk::Align::Center);
+        ph_center.set_halign(gtk::Align::Center);
+        ph_center.set_vexpand(true);
+        ph_center.set_opacity(0.35);
+        let ph_icon = gtk::Image::from_icon_name("utilities-terminal-symbolic");
+        ph_icon.set_pixel_size(20);
+        let ph_label = gtk::Label::new(Some("ACTIVE_"));
+        ph_label.add_css_class("orbit-peek-placeholder-label");
+        ph_center.append(&ph_icon);
+        ph_center.append(&ph_label);
+        placeholder.append(&ph_center);
+
         unparent_from_box(&vte_widget);
+        card_slot.insert_child_after(&placeholder, None::<&gtk::Widget>);
         content.append(&vte_widget);
         set_vte_interactive(&vte, true);
 
@@ -692,6 +712,7 @@ impl Session {
         // close, and drop the popover so another peek can open.
         {
             let session = self.clone();
+            let placeholder = placeholder.clone();
             popover.connect_closed(move |pop| {
                 let (card_slot, vte, vte_widget) = {
                     let inner = session.inner.borrow();
@@ -702,6 +723,7 @@ impl Session {
                     )
                 };
                 unparent_from_box(&vte_widget);
+                card_slot.remove(&placeholder);
                 card_slot.insert_child_after(&vte_widget, None::<&gtk::Widget>);
                 set_vte_interactive(&vte, false);
                 session.inner.borrow_mut().peek_popover = None;

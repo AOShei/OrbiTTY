@@ -52,7 +52,7 @@ impl Sidebar {
         btn_busy.set_group(Some(&btn_all));
         btn_busy.set_hexpand(true);
         btn_busy.add_css_class("orbit-filter-pill");
-        let btn_attn = gtk::ToggleButton::with_label("Attn");
+        let btn_attn = gtk::ToggleButton::with_label("Ready");
         btn_attn.set_group(Some(&btn_all));
         btn_attn.set_hexpand(true);
         btn_attn.add_css_class("orbit-filter-pill");
