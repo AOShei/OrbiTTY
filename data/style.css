@@ -67,6 +67,13 @@
     border-radius: 4px;
 }
 
+.orbit-filetree-lock {
+    -gtk-icon-size: 12px;
+    opacity: 0.6;
+    margin-right: 6px;
+    color: @warning_color;
+}
+
 .orbit-sidebar {
     background-color: alpha(@card_bg_color, 0.5);
     border-left: 1px solid @borders;

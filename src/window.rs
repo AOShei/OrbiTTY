@@ -4,7 +4,7 @@ use gtk4 as gtk;
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::filetree::{self, FileTree};
 use crate::menu;
@@ -102,6 +102,31 @@ fn show_name_dialog(
     if !initial_text.is_empty() {
         entry.select_region(0, -1);
     }
+}
+
+fn show_elevated_dialog(window: &adw::ApplicationWindow, weak: Weak<OrbitWindow>, path: String) {
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    let body = format!(
+        "\"{}\" requires root access. A new terminal will open here running as root via sudo.",
+        name
+    );
+    let dialog = adw::AlertDialog::new(Some("Elevated Permissions Required"), Some(&body));
+    dialog.add_response("cancel", "_Cancel");
+    dialog.add_response("open-root", "Open as _Root");
+    dialog.set_response_appearance("open-root", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.connect_response(None, move |_, response| {
+        if response == "open-root" {
+            if let Some(this) = weak.upgrade() {
+                this.open_terminal_as_root(&path);
+            }
+        }
+    });
+    dialog.present(Some(window));
 }
 
 pub struct OrbitWindow {
@@ -216,12 +241,16 @@ impl OrbitWindow {
 
         this.install_actions();
 
-        // Wire the file tree "open terminal here" callback now that we have `this`.
+        // Wire the file tree "open terminal here" callback (Alt+click).
         {
             let weak = Rc::downgrade(&this);
             *this.file_tree.open_cb.borrow_mut() = Box::new(move |path: String| {
-                if let Some(w) = weak.upgrade() {
-                    w.open_terminal_at(path);
+                let Some(this) = weak.upgrade() else { return };
+                if std::fs::read_dir(&path).is_err() {
+                    let weak2 = Rc::downgrade(&this);
+                    show_elevated_dialog(&this.window, weak2, path);
+                } else {
+                    this.open_terminal_at(path);
                 }
             });
         }
@@ -231,6 +260,11 @@ impl OrbitWindow {
             let weak = Rc::downgrade(&this);
             *this.file_tree.cd_cb.borrow_mut() = Box::new(move |path: String| -> bool {
                 let Some(this) = weak.upgrade() else { return false };
+                if std::fs::read_dir(&path).is_err() {
+                    let weak2 = Rc::downgrade(&this);
+                    show_elevated_dialog(&this.window, weak2, path);
+                    return true; // consumed — no busy flash
+                }
                 let Some(ws) = this.current_workspace() else { return false };
                 let Some(session) = ws.focused_session() else { return false };
                 if session.is_busy() {
@@ -320,6 +354,23 @@ impl OrbitWindow {
             .unwrap_or_else(|| "/".to_string());
         // promote=true: tries arena first, falls back to sidebar if arena is full (≥4).
         let session = ws.spawn_session(&name, Some(&path), true);
+        session.grab_focus();
+    }
+
+    /// Open a new terminal at `path` running as root via sudo.
+    /// The terminal starts in $HOME, then immediately sends a sudo command
+    /// that cds into the target directory and execs an interactive shell.
+    fn open_terminal_as_root(&self, path: &str) {
+        let Some(ws) = self.current_workspace() else { return };
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "root".to_string());
+        let session = ws.spawn_session(&name, None, true);
+        // Use a positional arg to pass the path to bash -c, avoiding nested quoting.
+        let safe = path.replace('\'', "'\\''");
+        let cmd = format!("sudo bash -c 'cd \"$1\" && exec bash' _ '{}'\n", safe);
+        session.set_post_spawn_text(cmd);
         session.grab_focus();
     }
 

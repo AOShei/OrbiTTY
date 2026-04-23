@@ -90,12 +90,14 @@ impl Workspace {
         }
 
         // Notify the file tree of the newly focused session's CWD.
+        // Use /proc as primary source (works for all shells + elevated sessions);
+        // fall back to OSC 7 only if proc read fails.
         let cwd_cb = self.inner.borrow().cwd_change_cb.clone();
         if let Some(cb) = cwd_cb {
             let cwd = sessions
                 .iter()
                 .find(|s| s.id() == id)
-                .and_then(|s| s.current_dir());
+                .and_then(|s| s.current_dir_proc().or_else(|| s.current_dir()));
             (cb)(cwd);
         }
     }

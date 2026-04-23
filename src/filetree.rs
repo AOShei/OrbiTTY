@@ -32,6 +32,7 @@ pub struct FileTree {
     scroller: gtk::ScrolledWindow,
     nodes: Rc<RefCell<HashMap<PathBuf, NodeData>>>,
     cwd: Rc<RefCell<Option<PathBuf>>>,
+    show_hidden: Rc<Cell<bool>>,
 }
 
 impl FileTree {
@@ -47,6 +48,19 @@ impl FileTree {
         title.set_halign(gtk::Align::Start);
         title.set_hexpand(true);
         header.append(&title);
+
+        let initially_show_hidden = load_show_hidden_state();
+        let hidden_btn = gtk::ToggleButton::new();
+        hidden_btn.add_css_class("flat");
+        if initially_show_hidden {
+            hidden_btn.set_active(true);
+            hidden_btn.set_icon_name("view-conceal-symbolic");
+            hidden_btn.set_tooltip_text(Some("Hide Hidden Directories"));
+        } else {
+            hidden_btn.set_icon_name("view-reveal-symbolic");
+            hidden_btn.set_tooltip_text(Some("Show Hidden Directories"));
+        }
+        header.append(&hidden_btn);
 
         let tree_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         tree_box.set_valign(gtk::Align::Start);
@@ -74,7 +88,24 @@ impl FileTree {
             scroller,
             nodes: Rc::new(RefCell::new(HashMap::new())),
             cwd: Rc::new(RefCell::new(None)),
+            show_hidden: Rc::new(Cell::new(initially_show_hidden)),
         };
+
+        {
+            let ft = ft.clone();
+            hidden_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    btn.set_icon_name("view-conceal-symbolic");
+                    btn.set_tooltip_text(Some("Hide Hidden Directories"));
+                } else {
+                    btn.set_icon_name("view-reveal-symbolic");
+                    btn.set_tooltip_text(Some("Show Hidden Directories"));
+                }
+                ft.show_hidden.set(btn.is_active());
+                save_show_hidden_state(btn.is_active());
+                ft.rebuild();
+            });
+        }
 
         ft.add_node(&PathBuf::from("/"), &ft.tree_box);
         ft
@@ -171,12 +202,14 @@ impl FileTree {
     }
 
     fn load_children(&self, path: &PathBuf, children_box: &gtk::Box) {
+        let show_hidden = self.show_hidden.get();
         let Ok(rd) = std::fs::read_dir(path) else {
             return;
         };
         let mut dirs: Vec<PathBuf> = rd
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter(|e| show_hidden || !e.file_name().to_string_lossy().starts_with('.'))
             .map(|e| e.path())
             .collect();
         dirs.sort();
@@ -194,6 +227,9 @@ impl FileTree {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default()
         };
+
+        // A directory is locked if we can't read its contents (permission denied).
+        let locked = path != Path::new("/") && std::fs::read_dir(path).is_err();
 
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         container.set_hexpand(true);
@@ -221,6 +257,15 @@ impl FileTree {
 
         row_box.append(&arrow);
         row_box.append(&name_btn);
+
+        if locked {
+            // Keep arrow in layout so name labels align with expandable dirs.
+            arrow.set_opacity(0.0);
+            arrow.set_sensitive(false);
+            let lock_icon = gtk::Image::from_icon_name("changes-prevent-symbolic");
+            lock_icon.add_css_class("orbit-filetree-lock");
+            row_box.append(&lock_icon);
+        }
 
         let children_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         children_box.set_visible(false);
@@ -292,6 +337,23 @@ impl FileTree {
         );
     }
 
+    /// Tear down and rebuild the tree from scratch, then re-expand to the
+    /// current CWD. Called when the show-hidden toggle changes.
+    pub fn rebuild(&self) {
+        while let Some(child) = self.tree_box.first_child() {
+            self.tree_box.remove(&child);
+        }
+        self.nodes.borrow_mut().clear();
+        self.add_node(&PathBuf::from("/"), &self.tree_box);
+        let cwd = self.cwd.borrow().clone();
+        *self.cwd.borrow_mut() = None;
+        if let Some(path) = cwd {
+            if let Some(s) = path.to_str() {
+                self.set_cwd(s);
+            }
+        }
+    }
+
     fn scroll_to(&self, path: &PathBuf) {
         let row = {
             let nodes = self.nodes.borrow();
@@ -340,6 +402,34 @@ pub fn load_open_state() -> bool {
 pub fn save_open_state(open: bool) {
     let path = state_file_path();
     if open {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, b"");
+    } else {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+// --- Persistent show-hidden state ---
+
+fn show_hidden_state_file_path() -> PathBuf {
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            PathBuf::from(home).join(".local").join("state")
+        });
+    state_home.join("orbitty").join("filetree_show_hidden")
+}
+
+pub fn load_show_hidden_state() -> bool {
+    show_hidden_state_file_path().exists()
+}
+
+pub fn save_show_hidden_state(show: bool) {
+    let path = show_hidden_state_file_path();
+    if show {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

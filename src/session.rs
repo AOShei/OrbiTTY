@@ -10,7 +10,8 @@ mod runtime;
 mod view;
 
 use self::runtime::{
-    foreground_command, format_duration_compact, is_foreground_elevated, is_terminal_idle,
+    cwd_tracking_pid, foreground_command, format_duration_compact, is_foreground_elevated,
+    is_terminal_idle,
 };
 use self::view::{
     apply_vte_theme, build_session_widgets, configure_terminal, set_vte_interactive,
@@ -103,6 +104,9 @@ pub struct SessionInner {
     /// Last CWD seen by either OSC 7 or /proc polling; used to suppress
     /// redundant fire-and-re-fire on the same path.
     pub last_known_cwd: Option<String>,
+    /// Text fed to the PTY immediately after the shell process spawns.
+    /// Used to send commands (e.g. sudo) before the first prompt appears.
+    pub post_spawn_text: Option<String>,
 }
 
 #[derive(Clone)]
@@ -205,6 +209,7 @@ impl Session {
             peek_popover: None,
             cwd_changed_cb: None,
             last_known_cwd: None,
+            post_spawn_text: None,
         }));
 
         let session = Session { inner };
@@ -506,7 +511,14 @@ impl Session {
                 move |result| {
                         if let Ok(pid) = result {
                             if let Some(inner_rc) = weak.upgrade() {
-                                inner_rc.borrow_mut().shell_pid = Some(pid.0 as i32);
+                                let post_text = {
+                                    let mut inner = inner_rc.borrow_mut();
+                                    inner.shell_pid = Some(pid.0 as i32);
+                                    inner.post_spawn_text.take()
+                                };
+                                if let Some(text) = post_text {
+                                    inner_rc.borrow().vte.feed_child(text.as_bytes());
+                                }
                             }
                         }
                     },
@@ -827,7 +839,8 @@ impl Session {
 
     /// Read CWD from /proc/[pid]/cwd — works for all shells, no OSC 7 needed.
     pub fn current_dir_proc(&self) -> Option<String> {
-        let pid = self.inner.borrow().shell_pid?;
+        let shell_pid = self.inner.borrow().shell_pid?;
+        let pid = cwd_tracking_pid(shell_pid);
         let link = std::fs::read_link(format!("/proc/{}/cwd", pid)).ok()?;
         link.to_str().map(|s| s.to_string())
     }
@@ -862,6 +875,19 @@ impl Session {
         let cmd = format!("cd -- '{}'\n", safe);
         let vte = self.inner.borrow().vte.clone();
         vte.feed_child(cmd.as_bytes());
+    }
+
+    /// Queue text to be fed to the PTY as soon as the shell process spawns.
+    /// If the shell is already running, sends immediately.
+    pub fn set_post_spawn_text(&self, text: String) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.shell_pid.is_some() {
+            let vte = inner.vte.clone();
+            drop(inner);
+            vte.feed_child(text.as_bytes());
+        } else {
+            inner.post_spawn_text = Some(text);
+        }
     }
 
 }

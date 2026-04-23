@@ -104,6 +104,20 @@ pub(super) fn is_foreground_elevated(shell_pid: i32) -> bool {
     false
 }
 
+/// PID to use for CWD tracking. Prefers the terminal's foreground process
+/// group leader (tpgid) over the original shell PID, so nested shells such
+/// as a root bash opened via `sudo bash` report their own working directory
+/// rather than the original shell's (unchanged) home directory.
+/// Falls back to `shell_pid` when tpgid is unavailable or zero.
+pub(super) fn cwd_tracking_pid(shell_pid: i32) -> i32 {
+    if let Some((_pgrp, tpgid)) = parse_pgrp_tpgid(shell_pid) {
+        if tpgid > 0 {
+            return tpgid;
+        }
+    }
+    shell_pid
+}
+
 /// Compact relative-duration format: `45s`, `3m`, `1h 12m`.
 pub(super) fn format_duration_compact(d: Duration) -> String {
     let s = d.as_secs();
