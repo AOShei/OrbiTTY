@@ -795,11 +795,11 @@ impl Workspace {
             return;
         }
 
-        let name = session.name();
+        let emoji = session.emoji();
         let cmdline = session.foreground_process_cmdline();
         let body = format!(
-            "A process is still running in \u{201C}{}\u{201D}. Closing the terminal will terminate it.",
-            name
+            "A process is still running in Shell {}. Closing the terminal will terminate it.",
+            emoji
         );
         let dialog = adw::AlertDialog::new(Some("Close this terminal?"), Some(&body));
         dialog.add_response("cancel", "_Cancel");
@@ -811,6 +811,7 @@ impl Workspace {
         // behind the v1_6 feature, so set it dynamically. libadwaita gracefully
         // ignores unknown properties on older runtimes.
         dialog.set_property("prefer-wide-layout", true);
+        dialog.set_content_width(460);
 
         // GNOME Console-style command bubble between the body and the buttons.
         if let Some(cmd) = cmdline {
@@ -818,9 +819,11 @@ impl Workspace {
             cmd_label.set_xalign(0.0);
             cmd_label.set_halign(gtk::Align::Fill);
             cmd_label.set_hexpand(true);
-            cmd_label.set_selectable(true);
             cmd_label.set_wrap(true);
             cmd_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            // Deliberately not selectable: a selectable label grabs focus
+            // from the default "Cancel" response and renders with all text
+            // highlighted on open. Read-only display is enough here.
             cmd_label.add_css_class("monospace");
             cmd_label.add_css_class("orbit-close-dialog-command");
             dialog.set_extra_child(Some(&cmd_label));
