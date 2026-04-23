@@ -2,10 +2,11 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk4 as gtk;
 use libadwaita as adw;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::filetree::{self, FileTree};
 use crate::menu;
 use crate::templates::WorkspaceTemplate;
 use crate::workspace::Workspace;
@@ -15,7 +16,6 @@ fn show_name_dialog(
     parent: &adw::ApplicationWindow,
     heading: &str,
     initial_text: &str,
-    _confirm_label: &str,
     on_confirm: impl FnOnce(String) + 'static,
 ) {
     let header = adw::HeaderBar::builder()
@@ -50,7 +50,7 @@ fn show_name_dialog(
 
     let cb: Rc<RefCell<Option<Box<dyn FnOnce(String)>>>> =
         Rc::new(RefCell::new(Some(Box::new(on_confirm))));
-    let closed: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    let closed: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     let do_close = {
         let closed = closed.clone();
@@ -111,6 +111,9 @@ pub struct OrbitWindow {
     workspaces: Rc<RefCell<HashMap<u32, Workspace>>>,
     next_ws_id: Rc<RefCell<u32>>,
     page_map: Rc<RefCell<HashMap<String, u32>>>,
+    file_tree: FileTree,
+    content_paned: gtk::Paned,
+    filetree_saved_width: Rc<Cell<i32>>,
 }
 
 impl OrbitWindow {
@@ -143,6 +146,12 @@ impl OrbitWindow {
         overview_btn.set_tooltip_text(Some("Show All Tabs"));
         header.pack_start(&overview_btn);
 
+        // File tree toggle button in the header
+        let filetree_btn = gtk::Button::from_icon_name("folder-symbolic");
+        filetree_btn.set_tooltip_text(Some("Toggle File Tree (Alt+E)"));
+        filetree_btn.set_action_name(Some("win.toggle-filetree"));
+        header.pack_start(&filetree_btn);
+
         // Main app menu on the far right; new-workspace button sits to its left.
         let menu_btn = menu::build_main_menu_button();
         header.pack_end(&menu_btn);
@@ -157,11 +166,33 @@ impl OrbitWindow {
         new_term_btn.set_action_name(Some("win.new-session"));
         header.pack_end(&new_term_btn);
 
-        // Toolbar layout: header + tab-bar on top, tab-view as content.
+        // --- File tree dock (left side) ---
+        let file_tree = FileTree::new();
+        let initially_open = filetree::load_open_state();
+
+        // Left-dock paned: file tree | tab view.
+        let content_paned = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .resize_start_child(false)
+            .shrink_start_child(true)
+            .resize_end_child(true)
+            .shrink_end_child(false)
+            .build();
+        content_paned.set_start_child(Some(&file_tree.root));
+        content_paned.set_end_child(Some(&tab_view));
+
+        if initially_open {
+            file_tree.root.set_visible(true);
+            content_paned.set_position(240);
+        } else {
+            file_tree.root.set_visible(false);
+        }
+
+        // Toolbar layout: header + tab-bar on top, paned as content.
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header);
         toolbar_view.add_top_bar(&tab_bar);
-        toolbar_view.set_content(Some(&tab_view));
+        toolbar_view.set_content(Some(&content_paned));
 
         // Wrap in TabOverview so Ctrl+Shift+O opens the zoomed-out grid.
         let tab_overview = adw::TabOverview::new();
@@ -178,9 +209,37 @@ impl OrbitWindow {
             workspaces: Rc::new(RefCell::new(HashMap::new())),
             next_ws_id: Rc::new(RefCell::new(1)),
             page_map: Rc::new(RefCell::new(HashMap::new())),
+            file_tree,
+            content_paned,
+            filetree_saved_width: Rc::new(Cell::new(240)),
         });
 
         this.install_actions();
+
+        // Wire the file tree "open terminal here" callback now that we have `this`.
+        {
+            let weak = Rc::downgrade(&this);
+            *this.file_tree.open_cb.borrow_mut() = Box::new(move |path: String| {
+                if let Some(w) = weak.upgrade() {
+                    w.open_terminal_at(path);
+                }
+            });
+        }
+
+        // Wire the file tree "cd here" callback (double-click → cd focused terminal).
+        {
+            let weak = Rc::downgrade(&this);
+            *this.file_tree.cd_cb.borrow_mut() = Box::new(move |path: String| -> bool {
+                let Some(this) = weak.upgrade() else { return false };
+                let Some(ws) = this.current_workspace() else { return false };
+                let Some(session) = ws.focused_session() else { return false };
+                if session.is_busy() {
+                    return false;
+                }
+                session.send_cd(&path);
+                true
+            });
+        }
 
         // The "+" inside the overview creates a workspace and prompts for a name.
         {
@@ -252,6 +311,18 @@ impl OrbitWindow {
         }
     }
 
+    /// Open a new terminal session at the given directory path.
+    fn open_terminal_at(&self, path: String) {
+        let Some(ws) = self.current_workspace() else { return };
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        // promote=true: tries arena first, falls back to sidebar if arena is full (≥4).
+        let session = ws.spawn_session(&name, Some(&path), true);
+        session.grab_focus();
+    }
+
     fn page_key(&self, page: &adw::TabPage) -> String {
         format!("{:p}", page.as_ptr())
     }
@@ -264,7 +335,16 @@ impl OrbitWindow {
             id
         };
 
-        let ws = Workspace::new(id, name, template);
+        let ws = Workspace::new(template);
+
+        // Wire CWD updates from this workspace to the file tree.
+        let ft = self.file_tree.clone();
+        ws.set_cwd_change_cb(move |cwd: Option<String>| {
+            if let Some(path) = cwd {
+                ft.set_cwd(&path);
+            }
+        });
+
         let page = self.tab_view.append(&ws.widget());
         page.set_title(name);
 
@@ -283,22 +363,13 @@ impl OrbitWindow {
     fn rename_page(&self, page: &adw::TabPage) {
         let current_title = page.title().to_string();
         let page = page.clone();
-        let workspaces = self.workspaces.clone();
-        let page_map = self.page_map.clone();
 
         show_name_dialog(
             &self.window,
             "Rename Workspace",
             &current_title,
-            "Rename",
             move |name| {
                 page.set_title(&name);
-                let key = format!("{:p}", page.as_ptr());
-                if let Some(&wid) = page_map.borrow().get(&key) {
-                    if let Some(ws) = workspaces.borrow().get(&wid) {
-                        ws.inner.borrow_mut().name = name;
-                    }
-                }
             },
         );
     }
@@ -324,7 +395,6 @@ impl OrbitWindow {
                         &this.window,
                         "New Workspace",
                         "",
-                        "Create",
                         move |name| {
                             if let Some(this) = weak2.upgrade() {
                                 if let Some(t) = WorkspaceTemplate::by_name("Empty") {
@@ -400,6 +470,7 @@ impl OrbitWindow {
             });
             group.add_action(&a);
         }
+
         // Ctrl+Shift+D: demote the currently focused arena session to the sidebar.
         {
             let weak = Rc::downgrade(self);
@@ -408,6 +479,20 @@ impl OrbitWindow {
                 if let Some(this) = weak.upgrade() {
                     if let Some(ws) = this.current_workspace() {
                         ws.demote_focused();
+                    }
+                }
+            });
+            group.add_action(&a);
+        }
+
+        // Ctrl+Shift+F: make the focused session the sole occupant of the arena.
+        {
+            let weak = Rc::downgrade(self);
+            let a = gio::SimpleAction::new("solo-session", None);
+            a.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade() {
+                    if let Some(ws) = this.current_workspace() {
+                        ws.solo_focused();
                     }
                 }
             });
@@ -492,6 +577,31 @@ impl OrbitWindow {
                     } else {
                         this.window.fullscreen();
                     }
+                }
+            });
+            group.add_action(&a);
+        }
+
+        // Alt+E: toggle the file tree dock
+        {
+            let weak = Rc::downgrade(self);
+            let a = gio::SimpleAction::new("toggle-filetree", None);
+            a.connect_activate(move |_, _| {
+                let Some(this) = weak.upgrade() else { return };
+                let currently_open = this.file_tree.root.is_visible();
+                if currently_open {
+                    this.filetree_saved_width.set(this.content_paned.position());
+                    this.file_tree.root.set_visible(false);
+                    filetree::save_open_state(false);
+                } else {
+                    this.file_tree.root.set_visible(true);
+                    let saved = this.filetree_saved_width.get();
+                    let pos = if saved > 0 { saved } else { 240 };
+                    let paned = this.content_paned.clone();
+                    glib::idle_add_local_once(move || {
+                        paned.set_position(pos);
+                    });
+                    filetree::save_open_state(true);
                 }
             });
             group.add_action(&a);

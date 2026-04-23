@@ -2,7 +2,6 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
 
 use crate::session::Session;
 
@@ -151,7 +150,6 @@ impl Sidebar {
             edge_below.connect_clicked(move |_| s.scroll_to_attention_below());
         }
 
-        sidebar.start_polling();
         sidebar
     }
 
@@ -281,21 +279,13 @@ impl Sidebar {
         }
     }
 
-    fn start_polling(&self) {
-        let s = self.clone();
-        glib::timeout_add_local(Duration::from_millis(250), move || {
-            s.apply_filter();
-            s.update_edge_indicators();
-            glib::ControlFlow::Continue
-        });
+    pub(crate) fn tick(&self) {
+        self.apply_filter();
+        self.update_edge_indicators();
     }
 
     pub fn widget(&self) -> gtk::Box {
         self.root.clone()
-    }
-
-    pub fn list_widget(&self) -> gtk::Box {
-        self.list.clone()
     }
 
     pub fn scroller_widget(&self) -> gtk::ScrolledWindow {
@@ -392,11 +382,6 @@ impl Sidebar {
             idx += 1;
         }
         idx
-    }
-
-    #[allow(dead_code)]
-    pub fn scroller(&self) -> gtk::ScrolledWindow {
-        self.scroller.clone()
     }
 
     /// Set the session id currently being dragged within the sidebar.

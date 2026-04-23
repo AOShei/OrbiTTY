@@ -125,6 +125,8 @@ fn register_actions(app: &adw::Application) {
         );
     }
     app.set_accels_for_action("win.demote-focused", &["<Primary><Shift>d"]);
+    app.set_accels_for_action("win.solo-session", &["<Primary><Shift>f"]);
+    app.set_accels_for_action("win.toggle-filetree", &["<Alt>e"]);
     app.set_accels_for_action("win.peek-sidebar", &["<Alt>space"]);
     app.set_accels_for_action("win.cycle-session-next", &["<Primary>Tab"]);
     app.set_accels_for_action(

@@ -60,16 +60,19 @@ target/debug/orbit
 |---|---|
 | `Ctrl+T` | New workspace |
 | `Ctrl+W` | Close workspace |
+| `F2` | Rename workspace |
 | `Ctrl+Shift+Return` | New shell in current workspace |
 | `Ctrl+Shift+E` | Toggle split orientation |
 | `Ctrl+Shift+O` | Show all tabs (overview) |
 | `Ctrl+Shift+N` | New window |
 | `Ctrl+Shift+F11` | Fullscreen |
-| `Super+1…9` | Focus session by index |
-| `Super+Shift+1…9` | Promote/demote session |
+| `Alt+1…9` | Focus session by index |
+| `Ctrl+Shift+D` | Send focused arena session to the monitoring dock |
+| `Alt+Space` | Peek the most relevant docked session |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle arena focus forward / backward |
 | `Ctrl++` / `Ctrl+-` / `Ctrl+0` | Zoom in / out / reset |
 | `Ctrl+Q` | Quit |
 
 ## License
 
-TBD
+MIT

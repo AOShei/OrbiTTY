@@ -1,5 +1,72 @@
 /* OrbiTTY - GTK4 CSS */
 
+/* ── File tree left dock ─────────────────────────────────────────────────── */
+
+.orbit-filetree {
+    background-color: alpha(@card_bg_color, 0.5);
+    border-right: 1px solid @borders;
+    min-width: 160px;
+}
+
+.orbit-filetree-header {
+    padding: 6px 10px 6px 10px;
+    border-bottom: 1px solid alpha(@borders, 0.6);
+}
+
+.orbit-filetree-row {
+    border-radius: 4px;
+    margin: 1px 4px;
+    transition: background 80ms ease;
+}
+
+.orbit-filetree-row:hover {
+    background: alpha(@window_fg_color, 0.07);
+}
+
+.orbit-filetree-row.orbit-cwd {
+    background: alpha(@accent_bg_color, 0.28);
+    border: 1px solid alpha(@accent_color, 0.45);
+}
+
+.orbit-filetree-row.orbit-cwd:hover {
+    background: alpha(@accent_bg_color, 0.38);
+}
+
+/* Busy flash: red pulse when a double-click cd is blocked by a busy terminal. */
+@keyframes orbit-busy-flash {
+    0%   { background-color: transparent; }
+    30%  { background-color: alpha(@error_color, 0.35); }
+    70%  { background-color: alpha(@error_color, 0.35); }
+    100% { background-color: transparent; }
+}
+
+.orbit-filetree-row.orbit-busy-flash {
+    animation: orbit-busy-flash 500ms ease-out;
+}
+
+.orbit-filetree-arrow {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 2px;
+    border-radius: 4px;
+    opacity: 0.55;
+    -gtk-icon-size: 14px;
+}
+
+.orbit-filetree-row:hover .orbit-filetree-arrow {
+    opacity: 0.85;
+}
+
+.orbit-filetree-row.orbit-cwd .orbit-filetree-arrow {
+    opacity: 0.9;
+}
+
+.orbit-filetree-name {
+    padding: 2px 4px 2px 2px;
+    font-size: 0.85em;
+    border-radius: 4px;
+}
+
 .orbit-sidebar {
     background-color: alpha(@card_bg_color, 0.5);
     border-left: 1px solid @borders;

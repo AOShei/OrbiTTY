@@ -20,8 +20,6 @@ pub struct Arena {
     phantom_index: Rc<Cell<usize>>,
     /// Session temporarily hidden for arena-shrink preview (drag to sidebar).
     preview_removed: Rc<RefCell<Option<u32>>>,
-    /// Pair of session ids currently preview-swapped (arena→arena drag).
-    preview_swapped: Rc<RefCell<Option<(u32, u32)>>>,
 }
 
 impl Arena {
@@ -47,7 +45,6 @@ impl Arena {
             phantom: Rc::new(RefCell::new(None)),
             phantom_index: Rc::new(Cell::new(0)),
             preview_removed: Rc::new(RefCell::new(None)),
-            preview_swapped: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -91,19 +88,6 @@ impl Arena {
         drop(v);
         self.rebuild();
         Some(session)
-    }
-
-    /// Swap the first arena session with `incoming`; returns the ejected session.
-    pub fn swap_with_oldest(&self, incoming: Session) -> Option<Session> {
-        if self.sessions.borrow().is_empty() {
-            self.sessions.borrow_mut().push(incoming);
-            self.rebuild();
-            return None;
-        }
-        let evicted = self.sessions.borrow_mut().remove(0);
-        self.sessions.borrow_mut().push(incoming);
-        self.rebuild();
-        Some(evicted)
     }
 
     /// Swap a specific arena session (by id) with `incoming`.
@@ -186,18 +170,6 @@ impl Arena {
         self.rebuild();
     }
 
-    /// Hide the phantom placeholder and rebuild to normal layout.
-    pub fn hide_phantom(&self) {
-        let had_phantom = self.phantom.borrow().is_some();
-        if let Some(phantom) = self.phantom.borrow().as_ref() {
-            phantom.set_visible(false);
-        }
-        *self.phantom.borrow_mut() = None;
-        if had_phantom {
-            self.rebuild();
-        }
-    }
-
     /// Return the slot index where the phantom is currently shown.
     pub fn phantom_slot(&self) -> usize {
         self.phantom_index.get()
@@ -219,87 +191,10 @@ impl Arena {
         self.rebuild();
     }
 
-    /// Restore a session hidden by `preview_remove`.
-    pub fn restore_remove(&self) {
-        if self.preview_removed.borrow_mut().take().is_some() {
-            self.rebuild();
-        }
-    }
-
-    /// Whether a remove preview is active.
-    pub fn has_preview_remove(&self) -> bool {
-        self.preview_removed.borrow().is_some()
-    }
-
-    // --- Arena swap preview (arena → arena drag) ---
-
-    /// Preview swapping two arena sessions. Undoes any previous preview swap
-    /// and performs a single rebuild.
-    pub fn preview_swap(&self, id_a: u32, id_b: u32) {
-        {
-            let current = self.preview_swapped.borrow();
-            if let Some((a, b)) = *current {
-                if (a == id_a && b == id_b) || (a == id_b && b == id_a) {
-                    return; // Already previewing this swap.
-                }
-            }
-        }
-        // Undo the previous preview swap in-place (no rebuild yet).
-        {
-            let old = self.preview_swapped.borrow_mut().take();
-            if let Some((old_a, old_b)) = old {
-                let mut v = self.sessions.borrow_mut();
-                let pos_a = v.iter().position(|s| s.id() == old_a);
-                let pos_b = v.iter().position(|s| s.id() == old_b);
-                if let (Some(a), Some(b)) = (pos_a, pos_b) {
-                    v.swap(a, b);
-                }
-            }
-        }
-        // Apply the new preview swap.
-        {
-            let mut v = self.sessions.borrow_mut();
-            let pos_a = v.iter().position(|s| s.id() == id_a);
-            let pos_b = v.iter().position(|s| s.id() == id_b);
-            if let (Some(a), Some(b)) = (pos_a, pos_b) {
-                v.swap(a, b);
-                drop(v);
-                *self.preview_swapped.borrow_mut() = Some((id_a, id_b));
-                self.rebuild();
-            }
-        }
-    }
-
-    /// Undo a preview swap, restoring original positions.
-    pub fn undo_preview_swap(&self) {
-        let ids = self.preview_swapped.borrow_mut().take();
-        if let Some((id_a, id_b)) = ids {
-            let mut v = self.sessions.borrow_mut();
-            let pos_a = v.iter().position(|s| s.id() == id_a);
-            let pos_b = v.iter().position(|s| s.id() == id_b);
-            if let (Some(a), Some(b)) = (pos_a, pos_b) {
-                v.swap(a, b);
-            }
-            drop(v);
-            self.rebuild();
-        }
-    }
-
-    /// Commit the preview swap (keep current positions, clear preview state).
-    pub fn commit_preview_swap(&self) {
-        *self.preview_swapped.borrow_mut() = None;
-    }
-
-    /// Whether a swap preview is active.
-    pub fn has_preview_swap(&self) -> bool {
-        self.preview_swapped.borrow().is_some()
-    }
-
     /// Clear all preview states (phantom, remove, swap).
     pub fn clear_all_previews(&self) {
         let had_any = self.phantom.borrow().is_some()
-            || self.preview_removed.borrow().is_some()
-            || self.preview_swapped.borrow().is_some();
+            || self.preview_removed.borrow().is_some();
 
         // Hide phantom.
         if let Some(phantom) = self.phantom.borrow().as_ref() {
@@ -309,19 +204,6 @@ impl Arena {
 
         // Restore removed session.
         *self.preview_removed.borrow_mut() = None;
-
-        // Undo swap in-place.
-        {
-            let ids = self.preview_swapped.borrow_mut().take();
-            if let Some((id_a, id_b)) = ids {
-                let mut v = self.sessions.borrow_mut();
-                let pos_a = v.iter().position(|s| s.id() == id_a);
-                let pos_b = v.iter().position(|s| s.id() == id_b);
-                if let (Some(a), Some(b)) = (pos_a, pos_b) {
-                    v.swap(a, b);
-                }
-            }
-        }
 
         if had_any {
             self.rebuild();

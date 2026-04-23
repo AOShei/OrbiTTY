@@ -6,6 +6,17 @@ use gtk4 as gtk;
 use libadwaita as adw;
 use vte4::prelude::*;
 
+mod runtime;
+mod view;
+
+use self::runtime::{
+    foreground_command, format_duration_compact, is_foreground_elevated, is_terminal_idle,
+};
+use self::view::{
+    apply_vte_theme, build_session_widgets, configure_terminal, set_vte_interactive,
+    sync_elevated_headers, unparent_from_box,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Location {
     Arena,
@@ -53,7 +64,6 @@ pub enum SessionEvent {
 
 pub struct SessionInner {
     pub id: u32,
-    pub name: String,
     pub emoji: String,
     pub vte: vte4::Terminal,
 
@@ -63,9 +73,6 @@ pub struct SessionInner {
     pub tile_slot: gtk::Box,
     pub tile_title: gtk::Label,
     pub tile_pip: gtk::Box,
-    pub demote_btn: gtk::Button,
-    pub tile_clone_btn: gtk::Button,
-    pub tile_close_btn: gtk::Button,
 
     // Sidebar card.
     pub card_frame: gtk::Box,
@@ -73,8 +80,6 @@ pub struct SessionInner {
     pub card_slot: gtk::Box,
     pub card_title: gtk::Label,
     pub card_pip: gtk::Box,
-    pub promote_btn: gtk::Button,
-    pub card_close_btn: gtk::Button,
     /// Metrics caption ("idle 15s", "busy 2m").
     pub metrics_label: gtk::Label,
 
@@ -90,10 +95,14 @@ pub struct SessionInner {
     /// Cleared on promote, peek, or explicit dismiss.
     pub attention: bool,
     pub shell_pid: Option<i32>,
-    pub poll_source: Option<glib::SourceId>,
     pub alert_until: Option<Instant>,
     /// Active peek popover, if the VTE is currently reparented into one.
     pub peek_popover: Option<gtk::Popover>,
+    /// Called with the new path whenever OSC 7 reports a CWD change.
+    pub cwd_changed_cb: Option<Box<dyn Fn(String)>>,
+    /// Last CWD seen by either OSC 7 or /proc polling; used to suppress
+    /// redundant fire-and-re-fire on the same path.
+    pub last_known_cwd: Option<String>,
 }
 
 #[derive(Clone)]
@@ -108,57 +117,9 @@ impl Session {
             .hexpand(true)
             .vexpand(true)
             .build();
-        vte.add_css_class("orbit-mini-vte");
+        configure_terminal(&vte);
 
-        // Default font scale handled by theme; keep a minimum readable size.
-        let font_desc = gtk::pango::FontDescription::from_string("Monospace 11");
-        vte.set_font(Some(&font_desc));
-        vte.set_font_scale(crate::app::current_font_scale());
-
-        // Sync VTE colors with the Adwaita color scheme.
-        apply_vte_theme(&vte);
-
-        // --- Arena tile shell ---
-        let tile_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        tile_frame.add_css_class("orbit-tile");
-        tile_frame.set_hexpand(true);
-        tile_frame.set_vexpand(true);
-
-        let tile_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        tile_header.add_css_class("orbit-tile-header");
-
-        let tile_pip = make_pip();
-        let tile_title = gtk::Label::new(Some(name));
-        tile_title.add_css_class("orbit-tile-title");
-        tile_title.set_halign(gtk::Align::Start);
-        tile_title.set_hexpand(true);
-        tile_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-
-        let tile_clone_btn = gtk::Button::from_icon_name("edit-copy-symbolic");
-        tile_clone_btn.set_tooltip_text(Some("Clone Session (spawn new at this cwd)"));
-        tile_clone_btn.add_css_class("flat");
-        tile_clone_btn.set_valign(gtk::Align::Center);
-
-        let demote_btn = gtk::Button::from_icon_name("go-next-symbolic");
-        demote_btn.set_tooltip_text(Some("Push to Sidebar"));
-        demote_btn.add_css_class("flat");
-        demote_btn.set_valign(gtk::Align::Center);
-
-        let tile_close_btn = gtk::Button::from_icon_name("window-close-symbolic");
-        tile_close_btn.set_tooltip_text(Some("Close Session"));
-        tile_close_btn.add_css_class("flat");
-        tile_close_btn.set_valign(gtk::Align::Center);
-
-        let tile_emoji = gtk::Label::new(Some(emoji));
-        tile_emoji.add_css_class("orbit-session-emoji");
-        tile_emoji.set_valign(gtk::Align::Center);
-
-        tile_header.append(&tile_pip);
-        tile_header.append(&tile_emoji);
-        tile_header.append(&tile_title);
-        tile_header.append(&tile_clone_btn);
-        tile_header.append(&demote_btn);
-        tile_header.append(&tile_close_btn);
+        let widgets = build_session_widgets(name, emoji);
 
         // Clicking the header focuses this tile's VTE.
         {
@@ -168,7 +129,7 @@ impl Session {
             gesture.connect_pressed(move |_, _, _, _| {
                 (cb.borrow())(id, SessionEvent::Focused);
             });
-            tile_header.add_controller(gesture);
+            widgets.tile_header.add_controller(gesture);
         }
 
         // Drag source on the tile header for arena reordering.
@@ -191,51 +152,8 @@ impl Session {
                     (cb.borrow())(id, SessionEvent::DragEnded);
                 });
             }
-            tile_header.add_controller(drag_source);
+            widgets.tile_header.add_controller(drag_source);
         }
-
-        let tile_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        tile_slot.set_hexpand(true);
-        tile_slot.set_vexpand(true);
-
-        tile_frame.append(&tile_header);
-        tile_frame.append(&tile_slot);
-
-        // --- Sidebar preview card ---
-        let card_frame = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        card_frame.add_css_class("orbit-preview-card");
-        card_frame.set_hexpand(true);
-        card_frame.set_vexpand(false);
-
-        let card_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        card_header.add_css_class("orbit-card-header");
-
-        let card_pip = make_pip();
-        let card_title = gtk::Label::new(Some(name));
-        card_title.add_css_class("orbit-preview-title");
-        card_title.set_halign(gtk::Align::Start);
-        card_title.set_hexpand(true);
-        card_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-
-        let promote_btn = gtk::Button::from_icon_name("go-previous-symbolic");
-        promote_btn.set_tooltip_text(Some("Promote to Arena"));
-        promote_btn.add_css_class("flat");
-        promote_btn.set_valign(gtk::Align::Center);
-
-        let card_close_btn = gtk::Button::from_icon_name("window-close-symbolic");
-        card_close_btn.set_tooltip_text(Some("Close Session"));
-        card_close_btn.add_css_class("flat");
-        card_close_btn.set_valign(gtk::Align::Center);
-
-        let card_emoji = gtk::Label::new(Some(emoji));
-        card_emoji.add_css_class("orbit-session-emoji");
-        card_emoji.set_valign(gtk::Align::Center);
-
-        card_header.append(&card_pip);
-        card_header.append(&card_emoji);
-        card_header.append(&card_title);
-        card_header.append(&promote_btn);
-        card_header.append(&card_close_btn);
 
         // Drag source on the card header so cards can be dragged into the arena.
         {
@@ -257,49 +175,24 @@ impl Session {
                     (cb.borrow())(id, SessionEvent::DragEnded);
                 });
             }
-            card_header.add_controller(drag_source);
+            widgets.card_header.add_controller(drag_source);
         }
-
-        let card_slot = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        card_slot.set_hexpand(true);
-        card_slot.set_vexpand(false);
-        card_slot.set_size_request(-1, 80);
-        card_slot.set_overflow(gtk::Overflow::Hidden);
-        card_slot.add_css_class("orbit-card-body");
-
-        let metrics_label = gtk::Label::new(None);
-        metrics_label.set_halign(gtk::Align::Start);
-        metrics_label.set_xalign(0.0);
-        metrics_label.add_css_class("orbit-card-metrics");
-
-        // Live VTE is reparented into card_slot before metrics_label when the
-        // session is in the sidebar; see place_in_sidebar/place_in_arena/peek.
-        card_slot.append(&metrics_label);
-
-        card_frame.append(&card_header);
-        card_frame.append(&card_slot);
 
         let inner = Rc::new(RefCell::new(SessionInner {
             id,
-            name: name.to_string(),
             emoji: emoji.to_string(),
             vte: vte.clone(),
-            tile_frame,
-            tile_header,
-            tile_slot,
-            tile_title,
-            tile_pip,
-            demote_btn: demote_btn.clone(),
-            tile_clone_btn: tile_clone_btn.clone(),
-            tile_close_btn: tile_close_btn.clone(),
-            card_frame,
-            card_header,
-            card_slot,
-            card_title,
-            card_pip,
-            promote_btn: promote_btn.clone(),
-            card_close_btn: card_close_btn.clone(),
-            metrics_label,
+            tile_frame: widgets.tile_frame.clone(),
+            tile_header: widgets.tile_header.clone(),
+            tile_slot: widgets.tile_slot.clone(),
+            tile_title: widgets.tile_title.clone(),
+            tile_pip: widgets.tile_pip.clone(),
+            card_frame: widgets.card_frame.clone(),
+            card_header: widgets.card_header.clone(),
+            card_slot: widgets.card_slot.clone(),
+            card_title: widgets.card_title.clone(),
+            card_pip: widgets.card_pip.clone(),
+            metrics_label: widgets.metrics_label.clone(),
             location: Location::Sidebar, // will be placed by workspace
             pip_state: PipState::Idle,
             elevated: false,
@@ -308,9 +201,10 @@ impl Session {
             state_since: Instant::now(),
             attention: false,
             shell_pid: None,
-            poll_source: None,
             alert_until: None,
             peek_popover: None,
+            cwd_changed_cb: None,
+            last_known_cwd: None,
         }));
 
         let session = Session { inner };
@@ -332,31 +226,31 @@ impl Session {
         // Wire events.
         {
             let cb = cb.clone();
-            promote_btn.connect_clicked(move |_| {
+            widgets.promote_btn.connect_clicked(move |_| {
                 (cb.borrow())(id, SessionEvent::RequestPromote);
             });
         }
         {
             let cb = cb.clone();
-            demote_btn.connect_clicked(move |_| {
+            widgets.demote_btn.connect_clicked(move |_| {
                 (cb.borrow())(id, SessionEvent::RequestDemote);
             });
         }
         {
             let cb = cb.clone();
-            tile_clone_btn.connect_clicked(move |_| {
+            widgets.tile_clone_btn.connect_clicked(move |_| {
                 (cb.borrow())(id, SessionEvent::RequestClone);
             });
         }
         {
             let cb = cb.clone();
-            tile_close_btn.connect_clicked(move |_| {
+            widgets.tile_close_btn.connect_clicked(move |_| {
                 (cb.borrow())(id, SessionEvent::RequestClose);
             });
         }
         {
             let cb = cb.clone();
-            card_close_btn.connect_clicked(move |_| {
+            widgets.card_close_btn.connect_clicked(move |_| {
                 (cb.borrow())(id, SessionEvent::RequestClose);
             });
         }
@@ -449,6 +343,28 @@ impl Session {
                     let inner = inner_rc.borrow();
                     inner.tile_title.set_text(&title);
                     inner.card_title.set_text(&title);
+                }
+            });
+        }
+        {
+            // Real-time CWD updates via OSC 7 (current-directory-uri).
+            // Also syncs last_known_cwd so the /proc poll does not double-fire.
+            let weak = Rc::downgrade(&session.inner);
+            vte.connect_current_directory_uri_notify(move |vte| {
+                let Some(inner_rc) = weak.upgrade() else { return };
+                let uri = vte.current_directory_uri();
+                let Some(uri) = uri else { return };
+                let file = gio::File::for_uri(uri.as_str());
+                let Some(path) = file.path().and_then(|p| p.to_str().map(|s| s.to_string()))
+                else {
+                    return;
+                };
+                // Sync so /proc poll won't re-fire for the same path 250ms later.
+                inner_rc.borrow_mut().last_known_cwd = Some(path.clone());
+                // Fire the workspace callback (separate borrow — callback borrows WorkspaceInner).
+                let inner = inner_rc.borrow();
+                if let Some(cb) = &inner.cwd_changed_cb {
+                    (cb)(path);
                 }
             });
         }
@@ -588,14 +504,13 @@ impl Session {
                 -1,
                 None::<&gio::Cancellable>,
                 move |result| {
-                    if let Ok(pid) = result {
-                        if let Some(inner_rc) = weak.upgrade() {
-                            inner_rc.borrow_mut().shell_pid = Some(pid.0 as i32);
-                            Session { inner: inner_rc }.start_polling();
+                        if let Ok(pid) = result {
+                            if let Some(inner_rc) = weak.upgrade() {
+                                inner_rc.borrow_mut().shell_pid = Some(pid.0 as i32);
+                            }
                         }
-                    }
-                },
-            );
+                    },
+                );
         }
 
         session
@@ -605,20 +520,8 @@ impl Session {
         self.inner.borrow().id
     }
 
-    pub fn name(&self) -> String {
-        self.inner.borrow().name.clone()
-    }
-
     pub fn emoji(&self) -> String {
         self.inner.borrow().emoji.clone()
-    }
-
-    pub fn location(&self) -> Location {
-        self.inner.borrow().location
-    }
-
-    pub fn vte(&self) -> vte4::Terminal {
-        self.inner.borrow().vte.clone()
     }
 
     pub fn tile_frame(&self) -> gtk::Box {
@@ -839,20 +742,7 @@ impl Session {
             return;
         }
         inner.elevated = elevated;
-        let dark = adw::StyleManager::default().is_dark();
-        let (add, remove) = if dark {
-            ("elevated-dark", "elevated-light")
-        } else {
-            ("elevated-light", "elevated-dark")
-        };
-        for header in [&inner.tile_header, &inner.card_header] {
-            header.remove_css_class(remove);
-            if elevated {
-                header.add_css_class(add);
-            } else {
-                header.remove_css_class(add);
-            }
-        }
+        sync_elevated_headers(&inner.tile_header, &inner.card_header, elevated);
     }
 
     /// Swap elevated-dark ↔ elevated-light when the theme changes.
@@ -861,16 +751,7 @@ impl Session {
         if !inner.elevated {
             return;
         }
-        let dark = adw::StyleManager::default().is_dark();
-        let (add, remove) = if dark {
-            ("elevated-dark", "elevated-light")
-        } else {
-            ("elevated-light", "elevated-dark")
-        };
-        for header in [&inner.tile_header, &inner.card_header] {
-            header.remove_css_class(remove);
-            header.add_css_class(add);
-        }
+        sync_elevated_headers(&inner.tile_header, &inner.card_header, true);
     }
 
     pub fn raise_alert(&self) {
@@ -879,56 +760,66 @@ impl Session {
             Some(Instant::now() + Duration::from_millis(1500));
     }
 
-    fn start_polling(&self) {
-        let weak = Rc::downgrade(&self.inner);
-        let source = glib::timeout_add_local(Duration::from_millis(250), move || {
-            let Some(inner_rc) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            let (pid, alert_until, prev_busy, location) = {
-                let inner = inner_rc.borrow();
-                (inner.shell_pid, inner.alert_until, inner.is_busy, inner.location)
-            };
+    pub(crate) fn tick(&self) {
+        let (pid, alert_until, prev_busy, location) = {
+            let inner = self.inner.borrow();
+            (inner.shell_pid, inner.alert_until, inner.is_busy, inner.location)
+        };
 
-            // Under an active alert we freeze the pip state but still let
-            // the preview tick so long-running demoted sessions don't appear
-            // stale on-screen.
-            let alert_active = alert_until
-                .map(|u| Instant::now() < u)
-                .unwrap_or(false);
+        // Under an active alert we freeze the pip state but still let
+        // the preview tick so long-running demoted sessions don't appear
+        // stale on-screen.
+        let alert_active = alert_until.map(|u| Instant::now() < u).unwrap_or(false);
+        if !alert_active && alert_until.is_some() {
+            self.inner.borrow_mut().alert_until = None;
+        }
+
+        if let Some(pid) = pid {
+            let now_busy = !is_terminal_idle(pid);
             if !alert_active {
-                if alert_until.is_some() {
-                    inner_rc.borrow_mut().alert_until = None;
+                self.set_pip(if now_busy { PipState::Busy } else { PipState::Idle });
+            }
+            if now_busy != prev_busy {
+                {
+                    let mut inner = self.inner.borrow_mut();
+                    inner.is_busy = now_busy;
+                    inner.state_since = Instant::now();
+                }
+                // Busy→Idle in the dock = "needs attention": the process
+                // just finished or is waiting for input while off-stage.
+                if !now_busy && location == Location::Sidebar {
+                    self.set_attention(true);
                 }
             }
+            self.set_elevated(is_foreground_elevated(pid));
+        }
 
-            let session = Session { inner: inner_rc };
-            if let Some(pid) = pid {
-                let now_busy = !is_terminal_idle(pid);
-                if !alert_active {
-                    session.set_pip(if now_busy { PipState::Busy } else { PipState::Idle });
-                }
-                if now_busy != prev_busy {
-                    {
-                        let mut inner = session.inner.borrow_mut();
-                        inner.is_busy = now_busy;
-                        inner.state_since = Instant::now();
-                    }
-                    // Busy→Idle in the dock = "needs attention": the process
-                    // just finished or is waiting for input while off-stage.
-                    if !now_busy && location == Location::Sidebar {
-                        session.set_attention(true);
-                    }
-                }
-                session.set_elevated(is_foreground_elevated(pid));
-            }
+        if location == Location::Sidebar {
+            self.refresh_preview();
+        }
+    }
 
-            if location == Location::Sidebar {
-                session.refresh_preview();
-            }
-            glib::ControlFlow::Continue
-        });
-        self.inner.borrow_mut().poll_source = Some(source);
+    pub fn set_cwd_changed_cb(&self, cb: Box<dyn Fn(String)>) {
+        self.inner.borrow_mut().cwd_changed_cb = Some(cb);
+    }
+
+    /// Read CWD from /proc/[pid]/cwd — works for all shells, no OSC 7 needed.
+    pub fn current_dir_proc(&self) -> Option<String> {
+        let pid = self.inner.borrow().shell_pid?;
+        let link = std::fs::read_link(format!("/proc/{}/cwd", pid)).ok()?;
+        link.to_str().map(|s| s.to_string())
+    }
+
+    /// Compare /proc CWD against last known value. Returns the new path if it
+    /// has changed (and updates the stored value); returns None if unchanged.
+    pub fn poll_cwd_changed(&self) -> Option<String> {
+        let proc_cwd = self.current_dir_proc()?;
+        let mut inner = self.inner.borrow_mut();
+        if inner.last_known_cwd.as_deref() == Some(proc_cwd.as_str()) {
+            return None;
+        }
+        inner.last_known_cwd = Some(proc_cwd.clone());
+        Some(proc_cwd)
     }
 
     /// Current working directory of the session's shell, derived from OSC 7
@@ -944,119 +835,13 @@ impl Session {
         vte.set_font_scale(scale);
     }
 
-    pub fn set_name(&self, name: &str) {
-        let mut inner = self.inner.borrow_mut();
-        inner.name = name.into();
-        inner.tile_title.set_text(name);
-        inner.card_title.set_text(name);
+    pub fn send_cd(&self, path: &str) {
+        let safe = path.replace('\'', "'\\''");
+        let cmd = format!("cd -- '{}'\n", safe);
+        let vte = self.inner.borrow().vte.clone();
+        vte.feed_child(cmd.as_bytes());
     }
-}
 
-/// Parse pgrp and tpgid from /proc/[pid]/stat.
-fn parse_pgrp_tpgid(pid: i32) -> Option<(i32, i32)> {
-    let data = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
-    let pos = data.rfind(')')?;
-    let rest = &data[pos + 2..];
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    if fields.len() <= 5 {
-        return None;
-    }
-    let pgrp: i32 = fields[2].parse().ok()?;
-    let tpgid: i32 = fields[5].parse().ok()?;
-    Some((pgrp, tpgid))
-}
-
-/// Check whether the terminal is waiting for user input.
-/// Handles nested shells (e.g. `su root` spawning a new bash).
-fn is_terminal_idle(shell_pid: i32) -> bool {
-    let Some((pgrp, tpgid)) = parse_pgrp_tpgid(shell_pid) else {
-        return true;
-    };
-    if pgrp == tpgid {
-        return true; // Original shell is the foreground → idle.
-    }
-    // Something else is foreground. If the fg leader is a shell at a
-    // prompt (e.g. root bash from `su`), the terminal is still "idle".
-    if tpgid > 0 {
-        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", tpgid)) {
-            let name = comm.trim();
-            // Strip leading '-' (login shell convention, e.g. "-bash").
-            let name = name.strip_prefix('-').unwrap_or(name);
-            const SHELLS: &[&str] = &[
-                "bash", "zsh", "fish", "sh", "dash", "ksh", "csh", "tcsh",
-                "nu", "nushell", "elvish", "ion", "xonsh", "pwsh",
-            ];
-            if SHELLS.contains(&name) {
-                // The fg leader is a shell. Check that IT is the foreground
-                // (it hasn't spawned a child command that took over).
-                if let Some((fg_pgrp, fg_tpgid)) = parse_pgrp_tpgid(tpgid) {
-                    return fg_pgrp == fg_tpgid;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Full command line of the foreground process currently running in the
-/// terminal, or None when the shell itself is at a prompt. Descends through
-/// nested shells (e.g. `su -` spawning bash) to reach the actual command.
-///
-/// Reads `/proc/<pid>/cmdline` rather than `/proc/<pid>/comm` so the user
-/// sees the real argv — `comm` is truncated to 15 chars and reflects the
-/// thread name for runtimes that set one (Node.js → "MainThread").
-fn foreground_command(shell_pid: i32) -> Option<String> {
-    const SHELLS: &[&str] = &[
-        "bash", "zsh", "fish", "sh", "dash", "ksh", "csh", "tcsh",
-        "nu", "nushell", "elvish", "ion", "xonsh", "pwsh",
-    ];
-    let (pgrp, tpgid) = parse_pgrp_tpgid(shell_pid)?;
-    if tpgid <= 0 || pgrp == tpgid {
-        return None;
-    }
-    // Use comm only for the shell-detection check (recurse through nested
-    // shells). Comm is cheap and well-suited for that purpose.
-    let comm = std::fs::read_to_string(format!("/proc/{}/comm", tpgid)).ok()?;
-    let raw = comm.trim();
-    let name = raw.strip_prefix('-').unwrap_or(raw);
-    if SHELLS.contains(&name) {
-        return foreground_command(tpgid);
-    }
-    // Real command: read argv from /proc/<pid>/cmdline (null-separated).
-    let cmdline_bytes = std::fs::read(format!("/proc/{}/cmdline", tpgid)).ok()?;
-    let parts: Vec<String> = cmdline_bytes
-        .split(|&b| b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| String::from_utf8_lossy(p).into_owned())
-        .collect();
-    if parts.is_empty() {
-        return Some(name.to_string());
-    }
-    Some(parts.join(" "))
-}
-
-/// Check whether the terminal's foreground process is running with root
-/// privileges (euid == 0). Used to tint the header bar red.
-fn is_foreground_elevated(shell_pid: i32) -> bool {
-    let Some((_pgrp, tpgid)) = parse_pgrp_tpgid(shell_pid) else {
-        return false;
-    };
-    if tpgid <= 0 {
-        return false;
-    }
-    let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", tpgid)) else {
-        return false;
-    };
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-            let fields: Vec<&str> = rest.split_whitespace().collect();
-            // Uid: real effective saved filesystem
-            if let Some(euid_str) = fields.get(1) {
-                return euid_str.parse::<u32>().unwrap_or(u32::MAX) == 0;
-            }
-        }
-    }
-    false
 }
 
 /// Extract the source session id from a DropTarget's current drag.
@@ -1065,81 +850,4 @@ pub(crate) fn extract_source_id(dt: &gtk::DropTarget) -> Option<u32> {
     let drag = drop.drag()?;
     let content = drag.content();
     content.value(<u32 as glib::types::StaticType>::static_type()).ok()?.get::<u32>().ok()
-}
-
-/// Detach `widget` from its current parent if that parent is a `gtk::Box`.
-/// Used to reparent the VTE between tile_slot / card_slot / peek popover.
-fn unparent_from_box(widget: &gtk::Widget) {
-    if let Some(parent) = widget.parent() {
-        if let Some(parent_box) = parent.downcast_ref::<gtk::Box>() {
-            parent_box.remove(widget);
-        }
-    }
-}
-
-/// Row count of the VTE when rendered as the dock's read-only preview.
-/// `set_size_request` only clamps the minimum — to actually *cap* VTE's
-/// natural height we have to pin its internal rows via `set_size`, which
-/// also sends SIGWINCH to the shell. Fine for line-based output; TUIs will
-/// redraw on demote/peek/promote.
-const PREVIEW_VTE_ROWS: i64 = 4;
-
-/// Toggle VTE between interactive (arena tile / peek popover) and read-only
-/// preview (sidebar card). Read-only mode blocks keystrokes, focus theft, and
-/// the blinking cursor so the card reads as a live snapshot, and pins VTE to
-/// a small row count so the card doesn't stretch to fill the dock.
-fn set_vte_interactive(vte: &vte4::Terminal, interactive: bool) {
-    vte.set_input_enabled(interactive);
-    vte.set_focusable(interactive);
-    vte.set_can_focus(interactive);
-    vte.set_can_target(interactive);
-    vte.set_cursor_blink_mode(if interactive {
-        vte4::CursorBlinkMode::System
-    } else {
-        vte4::CursorBlinkMode::Off
-    });
-    if interactive {
-        vte.set_vexpand(true);
-    } else {
-        vte.set_vexpand(false);
-        let cols = vte.column_count().max(20);
-        vte.set_size(cols, PREVIEW_VTE_ROWS);
-    }
-}
-
-/// Compact relative-duration format: `45s`, `3m`, `1h 12m`.
-fn format_duration_compact(d: Duration) -> String {
-    let s = d.as_secs();
-    if s < 60 {
-        format!("{}s", s)
-    } else if s < 3600 {
-        format!("{}m", s / 60)
-    } else {
-        format!("{}h {}m", s / 3600, (s / 60) % 60)
-    }
-}
-
-fn make_pip() -> gtk::Box {
-    let pip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    pip.add_css_class("orbit-pip");
-    pip.add_css_class("idle");
-    pip.set_valign(gtk::Align::Center);
-    pip.set_halign(gtk::Align::Center);
-    pip
-}
-
-/// Set VTE terminal foreground/background to match the current Adwaita theme.
-fn apply_vte_theme(vte: &vte4::Terminal) {
-    let dark = adw::StyleManager::default().is_dark();
-    let (fg, bg) = if dark {
-        // Adwaita dark: light text on dark bg
-        (gtk::gdk::RGBA::new(0.93, 0.93, 0.93, 1.0),
-         gtk::gdk::RGBA::new(0.12, 0.12, 0.12, 1.0))
-    } else {
-        // Adwaita light: dark text on light bg
-        (gtk::gdk::RGBA::new(0.2, 0.2, 0.2, 1.0),
-         gtk::gdk::RGBA::new(0.98, 0.98, 0.98, 1.0))
-    };
-    vte.set_color_foreground(&fg);
-    vte.set_color_background(&bg);
 }

@@ -1,8 +1,7 @@
-#![allow(dead_code)]
-
 mod about;
 mod app;
 mod arena;
+mod filetree;
 mod menu;
 mod prefs;
 mod session;

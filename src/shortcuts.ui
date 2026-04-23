@@ -64,6 +64,12 @@
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Focus Session Solo in Arena</property>
+                <property name="accelerator">&lt;Primary&gt;&lt;Shift&gt;f</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Cycle to Next Session</property>
                 <property name="accelerator">&lt;Primary&gt;Tab</property>
               </object>
@@ -79,6 +85,12 @@
         <child>
           <object class="GtkShortcutsGroup">
             <property name="title" translatable="yes">View</property>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Toggle File Tree</property>
+                <property name="accelerator">&lt;Alt&gt;e</property>
+              </object>
+            </child>
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Zoom In</property>
