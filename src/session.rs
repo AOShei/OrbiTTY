@@ -870,6 +870,17 @@ impl Session {
         vte.set_font_scale(scale);
     }
 
+    pub fn flash_busy(&self) {
+        let tile = self.inner.borrow().tile_frame.clone();
+        let card = self.inner.borrow().card_frame.clone();
+        tile.add_css_class("orbit-busy-flash");
+        card.add_css_class("orbit-busy-flash");
+        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+            tile.remove_css_class("orbit-busy-flash");
+            card.remove_css_class("orbit-busy-flash");
+        });
+    }
+
     pub fn send_cd(&self, path: &str) {
         let safe = path.replace('\'', "'\\''");
         let cmd = format!("cd -- '{}'\n", safe);

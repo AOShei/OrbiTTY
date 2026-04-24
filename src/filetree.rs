@@ -52,6 +52,7 @@ impl FileTree {
         let initially_show_hidden = load_show_hidden_state();
         let hidden_btn = gtk::ToggleButton::new();
         hidden_btn.add_css_class("flat");
+        hidden_btn.set_focusable(false);
         if initially_show_hidden {
             hidden_btn.set_active(true);
             hidden_btn.set_icon_name("view-conceal-symbolic");
@@ -71,6 +72,7 @@ impl FileTree {
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .vexpand(true)
             .hexpand(true)
+            .focusable(false)
             .build();
         scroller.set_child(Some(&tree_box));
 
@@ -243,12 +245,14 @@ impl FileTree {
         arrow.set_icon_name("pan-end-symbolic");
         arrow.add_css_class("flat");
         arrow.add_css_class("orbit-filetree-arrow");
+        arrow.set_focusable(false);
 
         let name_btn = gtk::Button::new();
         name_btn.add_css_class("flat");
         name_btn.add_css_class("orbit-filetree-name");
         name_btn.set_hexpand(true);
         name_btn.set_halign(gtk::Align::Fill);
+        name_btn.set_focusable(false);
         let name_label = gtk::Label::new(Some(&name));
         name_label.set_xalign(0.0);
         name_label.set_hexpand(true);
@@ -304,13 +308,14 @@ impl FileTree {
             let row_for_flash = row_box.clone();
             let gesture = gtk::GestureClick::new();
             gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
+            gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
             gesture.connect_pressed(move |g, n_press, _, _| {
+                // Claim the event so the button doesn't try to handle it (and potentially take focus).
+                g.set_state(gtk::EventSequenceState::Claimed);
                 let mods = g.current_event_state();
                 if mods.contains(gtk::gdk::ModifierType::ALT_MASK) {
-                    g.set_state(gtk::EventSequenceState::Claimed);
                     (open_cb.borrow())(path_str.clone());
                 } else if n_press == 2 {
-                    g.set_state(gtk::EventSequenceState::Claimed);
                     let sent = (cd_cb.borrow())(path_str.clone());
                     if !sent {
                         let row = row_for_flash.clone();

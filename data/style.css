@@ -40,7 +40,9 @@
     100% { background-color: transparent; }
 }
 
-.orbit-filetree-row.orbit-busy-flash {
+.orbit-filetree-row.orbit-busy-flash,
+.orbit-tile.orbit-busy-flash,
+.orbit-preview-card.orbit-busy-flash {
     animation: orbit-busy-flash 500ms ease-out;
 }
 

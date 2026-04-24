@@ -47,14 +47,17 @@ impl Sidebar {
         let btn_all = gtk::ToggleButton::with_label("All");
         btn_all.set_active(true);
         btn_all.set_hexpand(true);
+        btn_all.set_focusable(false);
         btn_all.add_css_class("orbit-filter-pill");
         let btn_busy = gtk::ToggleButton::with_label("Busy");
         btn_busy.set_group(Some(&btn_all));
         btn_busy.set_hexpand(true);
+        btn_busy.set_focusable(false);
         btn_busy.add_css_class("orbit-filter-pill");
         let btn_attn = gtk::ToggleButton::with_label("Ready");
         btn_attn.set_group(Some(&btn_all));
         btn_attn.set_hexpand(true);
+        btn_attn.set_focusable(false);
         btn_attn.add_css_class("orbit-filter-pill");
 
         filter_box.append(&btn_all);
@@ -68,12 +71,14 @@ impl Sidebar {
         edge_above.add_css_class("flat");
         edge_above.set_tooltip_text(Some("Attention above — click to scroll"));
         edge_above.set_visible(false);
+        edge_above.set_focusable(false);
 
         let edge_below = gtk::Button::with_label("↓ 0");
         edge_below.add_css_class("orbit-attn-edge");
         edge_below.add_css_class("flat");
         edge_below.set_tooltip_text(Some("Attention below — click to scroll"));
         edge_below.set_visible(false);
+        edge_below.set_focusable(false);
 
         let list = gtk::Box::new(gtk::Orientation::Vertical, 6);
         list.set_hexpand(true);
@@ -83,6 +88,7 @@ impl Sidebar {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .vexpand(true)
+            .focusable(false)
             .build();
         scroller.set_child(Some(&list));
 

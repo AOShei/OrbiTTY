@@ -268,6 +268,7 @@ impl OrbitWindow {
                 let Some(ws) = this.current_workspace() else { return false };
                 let Some(session) = ws.focused_session() else { return false };
                 if session.is_busy() {
+                    session.flash_busy();
                     return false;
                 }
                 session.send_cd(&path);
